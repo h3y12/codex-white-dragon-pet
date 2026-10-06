@@ -1,0 +1,8 @@
+/runtime/
+/__pycache__/
+*.py[cod]
+*.tmp
+*.log
+.venv/
+.DS_Store
+Thumbs.db
