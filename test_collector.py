@@ -70,6 +70,26 @@ class NotificationTests(unittest.TestCase):
             s=local.snapshot(); self.assertEqual(s['status'],'notification'); self.assertEqual(s['notificationReadErrors'],1)
             self.unread(root,[]); self.assertEqual(local.snapshot()['status'],'idle')
 
+    def test_finished_unread_task_keeps_latest_request(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); self.setup_catalog(root); self.unread(root,[])
+            path=root/'one.jsonl'
+            events=[self.event({'id':'one'},'session_meta'),
+                    self.event({'type':'user_message','message':'最初的请求'},'event_msg'),
+                    self.event({'type':'task_complete'},'event_msg'),
+                    self.event({'type':'user_message','message':'最新一轮的请求'},'event_msg'),
+                    self.event({'type':'task_started'},'event_msg')]
+            path.write_text(''.join(json.dumps(e)+'\n' for e in events),encoding='utf-8')
+            local=LocalTelemetry(root)
+            now=dt.datetime(2026,10,6,9,tzinfo=BEIJING).timestamp()
+            self.assertEqual(local.snapshot(now)['taskTitle'],'最新一轮的请求')
+            with path.open('a',encoding='utf-8') as f:
+                f.write(json.dumps(self.event({'type':'task_complete'},'event_msg'))+'\n')
+            self.unread(root,['one'])
+            state=local.snapshot(now)
+            self.assertEqual(state['status'],'notification')
+            self.assertEqual(state['taskTitle'],'最新一轮的请求')
+
     def test_question_has_priority_over_unread_and_busy(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); self.setup_catalog(root); self.unread(root,['one'])

@@ -295,6 +295,7 @@ class LocalTelemetry:
         active = []
         waiting = []
         recent_error = None
+        latest_requests = {}
         rate = None
         rate_time = 0
         errors = self.read_errors
@@ -318,6 +319,10 @@ class LocalTelemetry:
                 rate, rate_time = rollout.rate, rollout.rate_time
             if rollout.child:
                 continue
+            if rollout.session_id and rollout.current_request:
+                previous = latest_requests.get(rollout.session_id)
+                if previous is None or rollout.request_time > previous[0]:
+                    latest_requests[rollout.session_id] = (rollout.request_time, rollout.current_request)
             if (rollout.pending or rollout.async_pending) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
                 waiting.append(rollout)
             if rollout.active and now - rollout.last_event < 86400:
@@ -344,7 +349,8 @@ class LocalTelemetry:
         if status != 'needs_input' and notifications:
             status = 'notification'
             ident, title = next(iter(notifications.items()))
-            title = self.titles.get(ident, title)
+            # Completed rollouts retain their request even after leaving the active list.
+            title = latest_requests.get(ident, (0, ''))[1] or self.titles.get(ident, title)
             stale = False
         return {
             'date': str(day), 'todayTokens': total, 'cachedTokens': cached,
