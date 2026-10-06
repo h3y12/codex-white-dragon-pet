@@ -153,6 +153,27 @@ class TelemetryTests(unittest.TestCase):
             self.assertFalse(r.pending)
 
 
+    def test_latest_request_replaces_initial_title(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / 'sessions').mkdir()
+            events = [
+                self.event('2026-10-06T01:00:00Z', 'session_meta', {'id':'demo'}),
+                self.event('2026-10-06T01:00:01Z', 'event_msg', {'type':'user_message','message':'old request'}),
+                self.event('2026-10-06T02:00:00Z', 'event_msg', {'type':'task_started'}),
+                self.event('2026-10-06T02:00:01Z', 'event_msg', {'type':'user_message','message':'add reset countdown'}),
+            ]
+            self.write(root / 'sessions/demo.jsonl', events)
+            local = LocalTelemetry(root); local.titles['demo'] = 'initial conversation title'
+            state = local.snapshot(dt.datetime(2026,10,6,12,tzinfo=BEIJING).timestamp())
+            self.assertEqual(state['taskTitle'], 'add reset countdown')
+
+    def test_request_summary_filters_metadata_and_file_list(self):
+        summary = collector.request_summary('# Files mentioned by the user:\nsecret-path.png\n## My request:\nAdd countdown\nplease')
+        self.assertEqual(summary, 'Add countdown please')
+        self.assertEqual(collector.request_summary('<environment_context>metadata</environment_context>'), '')
+        self.assertEqual(collector.request_summary('# AGENTS.md instructions\n<INSTRUCTIONS>defaults</INSTRUCTIONS>'), '')
+        self.assertEqual(collector.request_summary('<send_user_message_question_reply>[]</send_user_message_question_reply>'), '')
+
 class RegressionTests(unittest.TestCase):
     event = TelemetryTests.event
     write = TelemetryTests.write

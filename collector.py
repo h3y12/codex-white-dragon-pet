@@ -58,6 +58,19 @@ def async_reply_keys(text):
     return result
 
 
+def request_summary(text):
+    """Use the latest human request, without injected app context or file lists."""
+    if text.startswith('# AGENTS.md instructions') and '<INSTRUCTIONS>' in text:
+        return ''
+    for tag in ('environment_context', 'external_codex_apps_open_page', 'send_user_message_question_reply'):
+        text = re.sub(r'<' + tag + r'>.*?</' + tag + r'>', '', text, flags=re.S)
+    marker = re.search(r'^## My request:\s*', text, re.M | re.I)
+    if marker:
+        text = text[marker.end():]
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:180] + ('…' if len(text) > 180 else '')
+
+
 class Rollout:
     def __init__(self, path):
         self.path = path
@@ -70,6 +83,8 @@ class Rollout:
         self.active = False
         self.stage = 'working'
         self.last_event = 0
+        self.current_request = ''
+        self.request_time = 0
         self.started = 0
         self.pending = {}
         self.async_pending = {}
@@ -214,6 +229,10 @@ class Rollout:
             text = '\n'.join(c.get('text', '') for c in content if isinstance(c, dict) and isinstance(c.get('text'), str)) if isinstance(content, list) else ''
         elif kind == 'user_message' and isinstance(p.get('message'), str):
             text = p['message']
+        summary = request_summary(text)
+        if summary and ts >= self.request_time:
+            self.current_request = summary
+            self.request_time = ts
         for ident, index in async_reply_keys(text):
             remaining = self.async_remaining.get(ident)
             if remaining is not None:
@@ -313,7 +332,7 @@ class LocalTelemetry:
         stale = False
         if current:
             status = 'needs_input' if current.pending or current.async_pending else current.stage
-            title = self.titles.get(current.session_id, 'Codex 浠诲姟')
+            title = current.current_request or self.titles.get(current.session_id, 'Codex 任务')
             stale = now - current.last_event > 600
         notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads)
         if notification_errors:

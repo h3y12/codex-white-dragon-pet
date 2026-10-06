@@ -79,7 +79,7 @@ $screen = [System.Windows.SystemParameters]::WorkArea
 function Set-PetSize([double]$size) {
  $defaults.Scale = $size
  $parts.Dragon.Width = 212 * $size; $parts.Dragon.Height = 294 * $size
- $cardRow = 232 + 12 * ($defaults.FontSize - 14)
+ $cardRow = 232 + 12 * ($defaults.FontSize - 14) + 3.4 * $defaults.FontSize
  $parts.Root.RowDefinitions[0].Height = [Windows.GridLength]::new($cardRow)
  $window.Width = 304 + 12 * ($defaults.FontSize - 14)
  $window.Height = $cardRow + 294 * $size + 10
@@ -197,17 +197,29 @@ $window.ContextMenu = $menu
 $script:lastRaw = ''
 $script:status = 'idle'
 $script:lastUpdated = 0
-function Reset-Label($bucket) {
+$script:primaryBucket = $null
+$script:secondaryBucket = $null
+function Reset-Label($bucket, [bool]$weekly = $false, [long]$now = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) {
+ $remainingLabel = if ($weekly) { $labels.weeklyRemaining } else { $labels.primaryRemaining }
  if ($bucket -and [double]$bucket.resetsAt -gt 0) {
-  return $labels.refreshTime + [DateTimeOffset]::FromUnixTimeSeconds([long]$bucket.resetsAt).ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm')
+  $resetAt = [long]$bucket.resetsAt
+  $seconds = [Math]::Max(0, $resetAt - $now)
+  $duration = [TimeSpan]::FromSeconds($seconds)
+  $remaining = if ($weekly) { $labels.daysHours -f $duration.Days, $duration.Hours } else { $labels.hoursMinutes -f ([Math]::Floor($duration.TotalHours)), $duration.Minutes }
+  return $labels.refreshTime + [DateTimeOffset]::FromUnixTimeSeconds($resetAt).ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') + "`n" + $remainingLabel + $remaining
  }
- return $labels.refreshTime + '--'
+ return $labels.refreshTime + '--' + "`n" + $remainingLabel + '--'
+}
+function Update-ResetLabels {
+ $parts.PrimaryReset.Text = Reset-Label $script:primaryBucket
+ $parts.SecondaryReset.Text = Reset-Label $script:secondaryBucket $true
 }
 function Update-State {
  try {
   if (-not (Test-Path -LiteralPath $StatePath)) { return }
   $raw = [IO.File]::ReadAllText($StatePath, [Text.Encoding]::UTF8)
   if ($raw -eq $script:lastRaw) {
+   Update-ResetLabels
    if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:lastUpdated -gt 15) { $parts.Heading.Text = $labels.disconnected }
    return
   }; $script:lastRaw = $raw
@@ -249,8 +261,8 @@ function Update-State {
   $parts.WeeklyBar.Value = if ($null -eq $sr) { 0 } else { $sr }
   $parts.QuotaLabel.Text = if ($rateAge -gt 180) { $labels.oldPrimary } else { $labels.primary }
   $parts.WeeklyLabel.Text = if ($rateAge -gt 180) { $labels.oldWeekly } else { $labels.weekly }
-  $parts.PrimaryReset.Text = Reset-Label $p
-  $parts.SecondaryReset.Text = Reset-Label $s
+  $script:primaryBucket = $p; $script:secondaryBucket = $s
+  Update-ResetLabels
   $tip = $labels.coverage -f $state.localCoverage, $state.cachedTokens, $state.outputTokens
   if ($null -ne $state.officialDayTokens) { $tip += "`n" + ($labels.official -f ([long]$state.officialDayTokens).ToString('N0')) }
   if ($isNotification) { $tip = $labels.messageAction + "`n" + $tip }
@@ -344,5 +356,5 @@ if ($RenderPath) {
  $render.Render($parts.Root)
  $encoder = New-Object Windows.Media.Imaging.PngBitmapEncoder
  $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($render))
- $outStream = [IO.File]::OpenWrite($RenderPath); $encoder.Save($outStream); $outStream.Close(); $window.Close()
+ $outStream = [IO.File]::Create($RenderPath); $encoder.Save($outStream); $outStream.Close(); $window.Close()
 } else { $window.ShowDialog() | Out-Null }
