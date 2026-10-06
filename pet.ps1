@@ -1,4 +1,4 @@
-param([switch]$PreviewOnly, [string]$RenderPath, [string]$StatePath, [double]$PreviewDpiScale = 1.0, [double]$PreviewPetScale = 0, [double]$PreviewFontSize = 0, [double]$PreviewPanelOpacity = 0)
+param([switch]$PreviewOnly, [string]$RenderPath, [string]$StatePath, [double]$PreviewDpiScale = 1.0, [double]$PreviewPetScale = 0, [double]$PreviewFontSize = 0, [double]$PreviewPanelOpacity = 0, [string]$PreviewPlanExpiry = '')
 $ErrorActionPreference = 'Stop'
 trap {
  $errorMessage = $_.Exception.Message
@@ -48,7 +48,7 @@ if (-not $PreviewOnly -and -not $mutex.WaitOne(0)) { exit }
 $stopPath = Join-Path $runtime ('stop-' + [Guid]::NewGuid().ToString('N'))
 if (-not $StatePath) { $StatePath = Join-Path $runtime 'state.json' }
 $settingsPath = Join-Path $runtime 'settings.json'
-$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95 }
+$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = '' }
 if (Test-Path -LiteralPath $settingsPath) {
  try { $saved = [IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json; foreach ($key in @($defaults.Keys)) { if ($null -ne $saved.$key) { $defaults[$key] = $saved.$key } } } catch {}
 }
@@ -57,6 +57,7 @@ if ($defaults.Left -eq -1 -and $defaults.Top -eq -1) { $defaults.Left = $null; $
 if ($PreviewOnly -and $PreviewPetScale -gt 0) { $defaults.Scale = $PreviewPetScale }
 if ($PreviewOnly -and $PreviewFontSize -gt 0) { $defaults.FontSize = $PreviewFontSize }
 if ($PreviewOnly -and $PreviewPanelOpacity -gt 0) { $defaults.PanelOpacity = $PreviewPanelOpacity }
+if ($PreviewOnly -and $PreviewPlanExpiry) { $defaults.PlanExpiry = $PreviewPlanExpiry }
 $defaults.FontSize = [Math]::Max(10, [Math]::Min(18, [Math]::Round([double]$defaults.FontSize)))
 $defaults.PanelOpacity = [Math]::Max(20, [Math]::Min(100, [double]$defaults.PanelOpacity))
 $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
@@ -64,7 +65,7 @@ $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
 $reader = New-Object Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $parts = @{}
-foreach ($name in @('Root','Card','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','Footnote','TaskTitle','Activity','TaskNote','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
+foreach ($name in @('Root','Card','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
 function Load-Pose([string]$filename) {
  $bitmap = New-Object Windows.Media.Imaging.BitmapImage
  $imageStream = [IO.File]::OpenRead((Join-Path $petRoot ('assets/' + $filename)))
@@ -128,6 +129,7 @@ function Set-PetFont([double]$size) {
  $defaults.FontSize = [Math]::Max(10, [Math]::Min(18, [Math]::Round($size)))
  Set-VisualFont $parts.Root $defaults.FontSize
  $menu.FontSize = $defaults.FontSize
+ if ($script:expiryPicker) { $script:expiryPicker.FontSize = $defaults.FontSize }
  if ($parts.Card.ToolTip -is [Windows.Controls.TextBlock]) { $parts.Card.ToolTip.FontSize = $defaults.FontSize }
  if ($script:fontLabel) { $script:fontLabel.Text = $labels.fontFormat -f $defaults.FontSize }
  Set-PetSize $defaults.Scale
@@ -192,6 +194,42 @@ $sizeSlider.Add_ValueChanged({
 $sizePanel.Children.Add($sizeSlider) | Out-Null
 $sizeItem.Header = $sizePanel
 $menu.Items.Add($sizeItem) | Out-Null
+function Update-PlanLabels {
+ $expiry = '--'; $remaining = '--'
+ try {
+  if ($defaults.PlanExpiry) {
+   $date = [DateTime]::ParseExact($defaults.PlanExpiry, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+   $expiry = $date.ToString('yyyy-MM-dd')
+   $today = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).Date
+   $days = [int]($date.Date - $today).TotalDays
+   $remaining = if ($days -gt 0) { $labels.remainingDays -f $days } elseif ($days -eq 0) { $labels.expiresToday } else { $labels.expired }
+  } else { $expiry = $labels.unset }
+ } catch { $expiry = $labels.unset }
+ $parts.PlanExpiry.Text = $labels.planExpiry -f $expiry
+ $parts.PlanRemaining.Text = $labels.planRemaining -f $remaining
+}
+Update-PlanLabels
+$expiryItem = New-Object Windows.Controls.MenuItem
+$expiryItem.StaysOpenOnClick = $true
+$expiryPanel = New-Object Windows.Controls.StackPanel
+$expiryCaption = New-Object Windows.Controls.TextBlock
+$expiryCaption.Text = $labels.planMenu
+$expiryPanel.Children.Add($expiryCaption) | Out-Null
+$expiryPicker = New-Object Windows.Controls.DatePicker
+$expiryPicker.Width = 210; $expiryPicker.FontSize = $defaults.FontSize
+$expiryPicker.Margin = [Windows.Thickness]::new(0,6,0,0)
+try { if ($defaults.PlanExpiry) { $expiryPicker.SelectedDate = [DateTime]::ParseExact($defaults.PlanExpiry, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } } catch {}
+$expiryPicker.Add_SelectedDateChanged({
+ $defaults.PlanExpiry = if ($expiryPicker.SelectedDate) { $expiryPicker.SelectedDate.ToString('yyyy-MM-dd') } else { '' }
+ Update-PlanLabels; Sync-PetLayout; Keep-InWorkArea; Save-Settings
+})
+$expiryPanel.Children.Add($expiryPicker) | Out-Null
+$clearExpiry = New-Object Windows.Controls.Button
+$clearExpiry.Content = $labels.clearExpiry; $clearExpiry.Margin = [Windows.Thickness]::new(0,6,0,0)
+$clearExpiry.Add_Click({ $expiryPicker.SelectedDate = $null; $expiryPicker.Text = '' })
+$expiryPanel.Children.Add($clearExpiry) | Out-Null
+$expiryItem.Header = $expiryPanel
+$menu.Items.Add($expiryItem) | Out-Null
 $menu.Items.Add((New-Object Windows.Controls.Separator)) | Out-Null
 Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings }
 Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation }
@@ -215,6 +253,7 @@ function Reset-Label($bucket, [bool]$weekly = $false, [long]$now = ([DateTimeOff
  return $labels.refreshTime + '--' + "`n" + $remainingLabel + '--'
 }
 function Update-ResetLabels {
+ Update-PlanLabels
  $parts.PrimaryReset.Text = Reset-Label $script:primaryBucket
  $parts.SecondaryReset.Text = Reset-Label $script:secondaryBucket $true
 }
@@ -250,7 +289,9 @@ function Update-State {
   $parts.TaskNote.Text = if ($isNotification) { $labels.messageAction } elseif ($state.statusStale) { $labels.staleStatus } else { $labels.finish }
   $limit = $state.rateLimits
   $p = $limit.primary; $s = $limit.secondary
+  $parts.ResetCredits.Text = if ($null -eq $state.resetCreditCount) { '--' } else { $labels.cardCount -f $state.resetCreditCount }
   $rateAge = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.rateUpdatedAt
+  $parts.ResetCreditLabel.Text = if ($rateAge -gt 180) { $labels.oldResetCredits } else { $labels.resetCredits }
   $expiredP = $null -ne $p -and [double]$p.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$p.resetsAt
   $expiredS = $null -ne $s -and [double]$s.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$s.resetsAt
   # Rollout fallback uses snake_case; live account endpoint uses camelCase.

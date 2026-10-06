@@ -314,6 +314,12 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(json.loads(state.read_text())['status'], 'idle')
             self.assertFalse(marker.exists())
 
+    def test_reset_credit_count_uses_authoritative_count(self):
+        self.assertEqual(collector.reset_credit_count({'rateLimitResetCredits': {'availableCount': 4, 'credits': [{}]}}), 4)
+        self.assertEqual(collector.reset_credit_count({'rateLimitResetCredits': {'availableCount': 0}}), 0)
+        for value in (None, {}, {'credits': [{}]}, {'availableCount': -1}, {'availableCount': True}, {'availableCount': '2'}):
+            self.assertIsNone(collector.reset_credit_count({'rateLimitResetCredits': value}))
+
     def test_optional_usage_failure_preserves_quota(self):
         called = threading.Event()
         reader = mock.Mock()

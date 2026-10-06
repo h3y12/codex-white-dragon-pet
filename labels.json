@@ -45,5 +45,16 @@
   "primaryRemaining": "5小时剩余时间：",
   "weeklyRemaining": "每周剩余时间：",
   "hoursMinutes": "{0}小时{1}分",
-  "daysHours": "{0}天{1}小时"
+  "daysHours": "{0}天{1}小时",
+  "planMenu": "套餐到期日（手动设置）",
+  "clearExpiry": "清除到期日",
+  "planExpiry": "套餐到期（手动）：{0}",
+  "planRemaining": "套餐剩余：{0}",
+  "unset": "未设置",
+  "remainingDays": "{0} 天",
+  "expiresToday": "今天到期",
+  "expired": "已到期",
+  "resetCredits": "重置卡",
+  "oldResetCredits": "重置卡（旧）",
+  "cardCount": "{0} 张"
 }

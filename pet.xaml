@@ -16,6 +16,9 @@
      <TextBlock x:Name="SecondaryReset" Text="刷新：--" Foreground="#BDB8CB" FontSize="14" Margin="0,2,0,0"/>
      <ProgressBar x:Name="WeeklyBar" Height="3" Maximum="100" Value="0" Foreground="#B5A3EB" Background="#504A61" BorderThickness="0" Margin="0,6,0,9"/>
      <DockPanel><TextBlock Text="今日 token" Foreground="#BDB8CB" FontSize="14"/><TextBlock x:Name="Tokens" Text="统计中…" Foreground="#F9F6FF" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Right"/></DockPanel>
+     <TextBlock x:Name="PlanExpiry" Text="套餐到期（手动）：未设置" Foreground="#BDB8CB" Margin="0,9,0,0"/>
+     <TextBlock x:Name="PlanRemaining" Text="套餐剩余：--" Foreground="#BDB8CB" Margin="0,2,0,0"/>
+     <DockPanel Margin="0,4,0,0"><TextBlock x:Name="ResetCreditLabel" Text="重置卡" Foreground="#BDB8CB"/><TextBlock x:Name="ResetCredits" Text="--" Foreground="#F9F6FF" FontWeight="SemiBold" HorizontalAlignment="Right"/></DockPanel>
      <TextBlock x:Name="Footnote" Text="本机 · 北京时间" Foreground="#A29AAF" FontSize="14" Margin="0,5,0,0"/>
     </StackPanel>
     <StackPanel x:Name="BusyPanel" Visibility="Collapsed">

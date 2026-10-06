@@ -480,6 +480,13 @@ class AccountReader:
                     stream.close()
 
 
+def reset_credit_count(reply):
+    credits = reply.get('rateLimitResetCredits')
+    count = credits.get('availableCount') if isinstance(credits, dict) else None
+    # Detail rows can be capped: only the service's availableCount is authoritative.
+    return count if type(count) is int and count >= 0 else None
+
+
 class AccountPoller:
     """Account I/O never blocks the two-second local telemetry loop."""
     def __init__(self, home):
@@ -487,7 +494,7 @@ class AccountPoller:
         self.stop_event = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
-        self.cache = {'rateLimits': None, 'rateUpdatedAt': 0, 'officialBuckets': None, 'accountConnected': False}
+        self.cache = {'rateLimits': None, 'rateUpdatedAt': 0, 'officialBuckets': None, 'accountConnected': False, 'resetCreditCount': None}
         self.thread = threading.Thread(target=self._poll, daemon=True)
         self.thread.start()
 
@@ -507,7 +514,7 @@ class AccountPoller:
                     rate = (limits.get('codex') if isinstance(limits, dict) else None) or reply.get('rateLimits')
                     with self.lock:
                         self.cache.update(rateLimits=rate if isinstance(rate, dict) else None,
-                            rateUpdatedAt=time.time(), accountConnected=True)
+                            rateUpdatedAt=time.time(), accountConnected=True, resetCreditCount=reset_credit_count(reply))
                     self.ready.set()
                     try:
                         buckets = account.call('account/usage/read').get('dailyUsageBuckets')
@@ -522,6 +529,7 @@ class AccountPoller:
                     account = None
                     with self.lock:
                         self.cache['accountConnected'] = False
+                        self.cache['resetCreditCount'] = None
                 finally:
                     self.ready.set()
                 self.stop_event.wait(60)
@@ -567,10 +575,11 @@ def run(args):
         while not (stop and stop.exists()):
             now = time.time()
             state = local.snapshot(now)
-            state.update(updatedAt=now, accountConnected=False, officialDayTokens=None)
+            state.update(updatedAt=now, accountConnected=False, officialDayTokens=None, resetCreditCount=None)
             if poller:
                 account = poller.snapshot()
                 state['accountConnected'] = account['accountConnected']
+                state['resetCreditCount'] = account['resetCreditCount']
                 if account['rateLimits'] and account['rateUpdatedAt'] >= state['rateUpdatedAt']:
                     state['rateLimits'] = account['rateLimits']
                     state['rateUpdatedAt'] = account['rateUpdatedAt']
