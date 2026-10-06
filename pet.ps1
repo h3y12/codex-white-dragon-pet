@@ -272,6 +272,7 @@ $stateTimer.Add_Tick({
   $parts.StatusDot.Fill = '#F295AD'
   $parts.Activity.Text = $labels.collectorHelp
   $parts.TaskNote.Text = $labels.collectorHelp
+  $parts.Card.ToolTip = $labels.collectorHelp
   $workerError = $script:worker.StandardError.ReadToEnd()
   if ($workerError) { [IO.File]::WriteAllText((Join-Path $runtime 'collector-error.txt'), $workerError, [Text.Encoding]::UTF8) }
   return
