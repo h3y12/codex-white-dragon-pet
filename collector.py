@@ -1,5 +1,6 @@
 """Read-only Codex telemetry. No inference, key extraction, or account mutations."""
 import argparse
+from contextlib import closing
 import datetime as dt
 import json
 import math
@@ -7,6 +8,7 @@ import tempfile
 import os
 from pathlib import Path
 import queue
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -40,6 +42,22 @@ def valid_usage(value):
     return clean or None
 
 
+def async_reply_keys(text):
+    """Only explicit Codex reply metadata resolves asynchronous questions."""
+    result = set()
+    for body in re.findall(r'<send_user_message_question_reply>(.*?)</send_user_message_question_reply>', text, re.S):
+        try:
+            replies = json.loads(body)
+            for reply in replies if isinstance(replies, list) else []:
+                ident = json.loads(reply.get('questionItemId', '')) if isinstance(reply, dict) else None
+                if (isinstance(ident, list) and len(ident) >= 3 and ident[0] == 'request_user_input_async'
+                        and isinstance(ident[1], str) and isinstance(ident[2], int) and 'answer' in reply):
+                    result.add((ident[1], ident[2]))
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
 class Rollout:
     def __init__(self, path):
         self.path = path
@@ -54,6 +72,8 @@ class Rollout:
         self.last_event = 0
         self.started = 0
         self.pending = {}
+        self.async_pending = {}
+        self.async_remaining = {}
         self.rate = None
         self.rate_time = 0
         self.child = False
@@ -147,6 +167,9 @@ class Rollout:
         elif kind in ('task_complete', 'turn_aborted'):
             self.active = False
             self.pending.clear()
+            if kind == 'turn_aborted':
+                self.async_pending.clear()
+                self.async_remaining.clear()
         elif kind in ('error', 'task_failed'):
             self.active = False
             self.stage = 'error'
@@ -161,12 +184,43 @@ class Rollout:
                         approval = json.loads(args).get('sandbox_permissions') == 'require_escalated'
                     except (ValueError, AttributeError):
                         pass
-                if ('request_user_input' in name and 'async' not in name) or approval:
+                if 'request_user_input_async' in name:
+                    ident = p.get('call_id', name)
+                    try:
+                        parsed_args = json.loads(args)
+                        questions = parsed_args.get('questions', []) if isinstance(parsed_args, dict) else []
+                        count = len(questions) if isinstance(questions, list) else 0
+                    except (ValueError, TypeError):
+                        count = 0
+                    self.async_pending[ident] = ts
+                    self.async_remaining[ident] = set(range(max(1, count)))
+                elif 'request_user_input' in name or name.endswith('request_permissions') or approval:
                     self.pending[p.get('call_id', name)] = ts
             elif kind in ('function_call_output', 'custom_tool_call_output'):
                 self.pending.pop(p.get('call_id'), None)
+                if p.get('call_id') in self.async_pending:
+                    try:
+                        reply = json.loads(p.get('output', ''))
+                        if isinstance(reply, dict) and (reply.get('accepted') is False or 'error' in reply):
+                            self.async_pending.pop(p.get('call_id'), None)
+                            self.async_remaining.pop(p.get('call_id'), None)
+                    except (ValueError, TypeError):
+                        pass
             elif kind == 'reasoning':
                 self.stage = 'thinking'
+        text = ''
+        if event.get('type') == 'response_item' and kind == 'message' and p.get('role') == 'user':
+            content = p.get('content', [])
+            text = '\n'.join(c.get('text', '') for c in content if isinstance(c, dict) and isinstance(c.get('text'), str)) if isinstance(content, list) else ''
+        elif kind == 'user_message' and isinstance(p.get('message'), str):
+            text = p['message']
+        for ident, index in async_reply_keys(text):
+            remaining = self.async_remaining.get(ident)
+            if remaining is not None:
+                remaining.discard(index)
+                if not remaining:
+                    self.async_pending.pop(ident, None)
+                    self.async_remaining.pop(ident, None)
         if ts:
             self.last_event = max(self.last_event, ts)
 
@@ -178,6 +232,9 @@ class LocalTelemetry:
         self.titles = {}
         self.next_discovery = 0
         self.read_errors = 0
+        self.eligible_threads = set()
+        self.last_notifications = {}
+        self.catalog_available = False
 
     def discover(self):
         paths = set()
@@ -189,9 +246,13 @@ class LocalTelemetry:
         database = self.home / 'state_5.sqlite'
         if database.exists():
             try:
-                with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1) as con:
-                    for row in con.execute('SELECT id, title, rollout_path FROM threads'):
+                with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1)) as con:
+                    self.eligible_threads = set()
+                    self.catalog_available = True
+                    for row in con.execute('SELECT id, title, rollout_path, archived FROM threads'):
                         self.titles[row[0]] = row[1]
+                        if not row[3]:
+                            self.eligible_threads.add(row[0])
                         path = Path(row[2])
                         if path.exists():
                             paths.add(path)
@@ -213,6 +274,7 @@ class LocalTelemetry:
         seen = set()
         total = cached = output = 0
         active = []
+        waiting = []
         recent_error = None
         rate = None
         rate_time = 0
@@ -237,27 +299,80 @@ class LocalTelemetry:
                 rate, rate_time = rollout.rate, rollout.rate_time
             if rollout.child:
                 continue
+            if (rollout.pending or rollout.async_pending) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
+                waiting.append(rollout)
             if rollout.active and now - rollout.last_event < 86400:
                 active.append(rollout)
             elif rollout.stage == 'error' and now - rollout.last_event < 120:
                 recent_error = rollout
         def priority(r):
-            return (bool(r.pending), r.last_event)
-        current = max(active, key=priority) if active else recent_error
+            return (bool(r.pending or r.async_pending), r.last_event)
+        current = max(waiting or active, key=priority) if waiting or active else recent_error
         status = 'idle'
         title = ''
         stale = False
         if current:
-            status = 'needs_input' if current.pending else current.stage
+            status = 'needs_input' if current.pending or current.async_pending else current.stage
             title = self.titles.get(current.session_id, 'Codex 浠诲姟')
             stale = now - current.last_event > 600
+        notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads)
+        if notification_errors:
+            notifications = dict(self.last_notifications, **notifications)
+        else:
+            self.last_notifications = dict(notifications)
+        waiting_ids = {r.session_id for r in waiting}
+        # A pending question takes precedence over unread results and busy work.
+        if status != 'needs_input' and notifications:
+            status = 'notification'
+            ident, title = next(iter(notifications.items()))
+            title = self.titles.get(ident, title)
+            stale = False
         return {
             'date': str(day), 'todayTokens': total, 'cachedTokens': cached,
             'outputTokens': output, 'status': status, 'taskTitle': title,
             'activeCount': len(active), 'statusStale': stale,
+            'notificationCount': len(waiting_ids | set(notifications)),
+            'unreadCount': len(notifications), 'pendingInputCount': len(waiting_ids),
+            'notificationReadErrors': notification_errors,
             'rateLimits': rate, 'rateUpdatedAt': rate_time,
             'localCoverage': len(self.rollouts), 'readErrors': errors,
         }
+
+
+def desktop_notifications(home, eligible_threads):
+    """Read the desktop's saved read state; never mark anything read here."""
+    notifications = {}
+    errors = 0
+    saved = home / '.codex-global-state.json'
+    if saved.exists():
+        try:
+            data = json.loads(saved.read_text(encoding='utf-8-sig'))
+            state = data.get('electron-thread-read-state-v1', {})
+            if not isinstance(state, dict) or state.get('version') != 1:
+                raise ValueError('Unsupported desktop read-state format')
+            identities = state.get('unreadByIdentity', {})
+            if not isinstance(identities, dict):
+                raise ValueError('Invalid desktop read state')
+            for hosts in identities.values():
+                if not isinstance(hosts, dict):
+                    continue
+                for host, ids in hosts.items():
+                    if host.startswith('local:') and isinstance(ids, list):
+                        for ident in ids:
+                            if isinstance(ident, str) and ident in eligible_threads:
+                                notifications[ident] = 'Codex 消息'
+        except (OSError, ValueError, AttributeError):
+            errors += 1
+    database = home / 'sqlite/codex-dev.db'
+    if database.exists():
+        try:
+            with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=.2)) as con:
+                for ident, title, thread_id in con.execute('SELECT id, title, thread_id FROM inbox_items WHERE read_at IS NULL ORDER BY created_at DESC'):
+                    key = thread_id or ('inbox:' + str(ident))
+                    notifications.setdefault(key, title or 'Codex 收件箱消息')
+        except sqlite3.Error:
+            errors += 1
+    return notifications, errors
 
 
 class AccountReader:

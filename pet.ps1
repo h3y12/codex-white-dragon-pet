@@ -73,6 +73,7 @@ function Load-Pose([string]$filename) {
 }
 $idlePose = Load-Pose 'dragon-idle.png'
 $thinkingPose = Load-Pose 'dragon-thinking.png'
+$letterPose = Load-Pose 'dragon-letter.png'
 $parts.Dragon.Source = $idlePose
 $screen = [System.Windows.SystemParameters]::WorkArea
 function Set-PetSize([double]$size) {
@@ -214,18 +215,22 @@ function Update-State {
   $script:lastUpdated = [double]$state.updatedAt
   $script:status = $state.status
   $isIdle = $state.status -eq 'idle'
-  $parts.Dragon.Source = if ($isIdle) { $idlePose } else { $thinkingPose }
+  $isNotification = $state.status -in @('notification', 'needs_input')
+  $parts.Dragon.Source = if ($isNotification) { $letterPose } elseif ($isIdle) { $idlePose } else { $thinkingPose }
+  # A pending message remains visible even when the normal card is collapsed.
+  $parts.Card.Visibility = if ($isNotification -or $defaults.CardVisible) { 'Visible' } else { 'Hidden' }
   $parts.IdlePanel.Visibility = if ($isIdle) { 'Visible' } else { 'Collapsed' }
   $parts.BusyPanel.Visibility = if ($isIdle) { 'Collapsed' } else { 'Visible' }
   $parts.Heading.Text = $labels.($state.status)
   if (-not $parts.Heading.Text) { $parts.Heading.Text = $labels.working }
-  $parts.StatusDot.Fill = if ($state.status -eq 'needs_input') { '#F3C36E' } elseif ($state.status -eq 'error') { '#F295AD' } else { '#B8A8E8' }
+  $parts.StatusDot.Fill = if ($isNotification) { '#F3C36E' } elseif ($state.status -eq 'error') { '#F295AD' } else { '#B8A8E8' }
+  $parts.Card.BorderBrush = if ($isNotification) { '#D2B177' } else { '#74688E' }
   $parts.Tokens.Text = ([long]$state.todayTokens).ToString('N0')
   $parts.Footnote.Text = $labels.localDate + ' ' + $state.date
   if ($state.readErrors -gt 0) { $parts.Footnote.Text += ' ' + $labels.partial }
   $parts.TaskTitle.Text = $state.taskTitle
-  $parts.Activity.Text = if ($state.activeCount -gt 1) { $labels.multi -f $state.activeCount } else { $labels.activity }
-  $parts.TaskNote.Text = if ($state.statusStale) { $labels.staleStatus } elseif ($state.status -eq 'needs_input') { $labels.approve } else { $labels.finish }
+  $parts.Activity.Text = if ($isNotification) { $labels.notificationCount -f [Math]::Max(1, [int]$state.notificationCount) } elseif ($state.activeCount -gt 1) { $labels.multi -f $state.activeCount } else { $labels.activity }
+  $parts.TaskNote.Text = if ($isNotification) { $labels.messageAction } elseif ($state.statusStale) { $labels.staleStatus } else { $labels.finish }
   $limit = $state.rateLimits
   $p = $limit.primary; $s = $limit.secondary
   $rateAge = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.rateUpdatedAt
@@ -248,6 +253,8 @@ function Update-State {
   $parts.SecondaryReset.Text = Reset-Label $s
   $tip = $labels.coverage -f $state.localCoverage, $state.cachedTokens, $state.outputTokens
   if ($null -ne $state.officialDayTokens) { $tip += "`n" + ($labels.official -f ([long]$state.officialDayTokens).ToString('N0')) }
+  if ($isNotification) { $tip = $labels.messageAction + "`n" + $tip }
+  if ($state.notificationReadErrors -gt 0) { $tip += "`n" + $labels.notificationPartial }
   if ($state.rateUpdatedAt -gt 0) { $tip += "`n" + $labels.updated + [DateTimeOffset]::FromUnixTimeSeconds([long]$state.rateUpdatedAt).ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm:ss') }
   if ($p.resetsAt) { $tip += "`n" + $labels.reset + [DateTimeOffset]::FromUnixTimeSeconds([long]$p.resetsAt).ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') }
   if ($s.resetsAt) { $tip += "`n" + $labels.weekReset + [DateTimeOffset]::FromUnixTimeSeconds([long]$s.resetsAt).ToOffset([TimeSpan]::FromHours(8)).ToString('MM-dd HH:mm') }
@@ -257,7 +264,7 @@ function Update-State {
   if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.updatedAt -gt 15) { $parts.Heading.Text = $labels.disconnected }
   if (-not $PreviewOnly) {
    $dpi = [Windows.Media.VisualTreeHelper]::GetDpi($window)
-   $uiState = @{ processId = $PID; scale = $defaults.Scale; status = $script:status; pose = $(if ($isIdle) { 'idle' } else { 'thinking' }); visible = $window.IsVisible; updatedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); dpiScale = $dpi.DpiScaleX; perMonitorV2 = [PetDpi]::AreDpiAwarenessContextsEqual([PetDpi]::GetThreadDpiAwarenessContext(), [IntPtr]::new(-4)); fontSize = $defaults.FontSize; fontMin = 10; fontMax = 18; panelOpacity = $defaults.PanelOpacity; primaryReset = $parts.PrimaryReset.Text; secondaryReset = $parts.SecondaryReset.Text }
+   $uiState = @{ processId = $PID; scale = $defaults.Scale; status = $script:status; pose = $(if ($isNotification) { 'letter' } elseif ($isIdle) { 'idle' } else { 'thinking' }); notificationCount = $state.notificationCount; visible = $window.IsVisible; updatedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); dpiScale = $dpi.DpiScaleX; perMonitorV2 = [PetDpi]::AreDpiAwarenessContextsEqual([PetDpi]::GetThreadDpiAwarenessContext(), [IntPtr]::new(-4)); fontSize = $defaults.FontSize; fontMin = 10; fontMax = 18; panelOpacity = $defaults.PanelOpacity; primaryReset = $parts.PrimaryReset.Text; secondaryReset = $parts.SecondaryReset.Text }
    [IO.File]::WriteAllText((Join-Path $runtime 'ui.json'), ($uiState | ConvertTo-Json), [Text.Encoding]::UTF8)
   }
  } catch { $parts.Heading.Text = $labels.reading }

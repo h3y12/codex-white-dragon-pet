@@ -9,9 +9,88 @@ import threading
 import time
 import queue
 import argparse
+from contextlib import closing
+import sqlite3
 import collector
 
 from collector import BEIJING, LocalTelemetry, Rollout
+
+
+class NotificationTests(unittest.TestCase):
+    def event(self, payload, kind='response_item'):
+        return {'timestamp': '2026-10-06T01:00:00Z', 'type': kind, 'payload': payload}
+
+    def ask(self, rollout, count=1):
+        rollout.consume(self.event({'type':'function_call', 'name':'request_user_input_async',
+            'call_id':'ask', 'arguments':json.dumps({'questions':[{'title':'demo'}]*count})}))
+
+    def answer(self, rollout, index=0, role='user'):
+        text = '<send_user_message_question_reply>' + json.dumps([{
+            'questionItemId':json.dumps(['request_user_input_async','ask',index]), 'answer':'yes'
+        }]) + '</send_user_message_question_reply>'
+        rollout.consume(self.event({'type':'message','role':role,'content':[{'type':'input_text','text':text}]}))
+
+    def test_async_ack_and_turn_completion_do_not_dismiss_question(self):
+        r = Rollout(Path('unused')); self.ask(r)
+        r.consume(self.event({'type':'function_call_output','call_id':'ask','output':'{"accepted":true}'}))
+        r.consume(self.event({'type':'task_complete'}, 'event_msg'))
+        self.assertFalse(r.active); self.assertTrue(r.async_pending)
+        self.answer(r,role='assistant'); self.assertTrue(r.async_pending)
+        self.answer(r); self.assertFalse(r.async_pending)
+
+    def test_partial_answers_keep_remaining_questions(self):
+        r=Rollout(Path('unused')); self.ask(r,2)
+        self.answer(r,0); self.assertTrue(r.async_pending)
+        self.answer(r,1); self.assertFalse(r.async_pending)
+
+    def test_failed_request_and_interruption_clear_question(self):
+        r=Rollout(Path('unused')); self.ask(r)
+        r.consume(self.event({'type':'function_call_output','call_id':'ask','output':'{"accepted":false}'}))
+        self.assertFalse(r.async_pending)
+        self.ask(r); r.consume(self.event({'type':'turn_aborted'},'event_msg'))
+        self.assertFalse(r.async_pending)
+
+    def setup_catalog(self, root):
+        with closing(sqlite3.connect(root/'state_5.sqlite')) as c, c:
+            c.execute('CREATE TABLE threads(id,title,rollout_path,archived)')
+            c.executemany('INSERT INTO threads VALUES(?,?,?,?)', [('one','演示任务',str(root/'one.jsonl'),0),('old','归档',str(root/'old.jsonl'),1)])
+
+    def unread(self, root, ids):
+        data={'electron-thread-read-state-v1':{'version':1,'unreadByIdentity':{'demo':{
+            'local:host':ids, 'ssh:remote':['one']}}}}
+        (root/'.codex-global-state.json').write_text(json.dumps(data),encoding='utf-8')
+
+    def test_unread_priority_dedup_clear_and_partial_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); self.setup_catalog(root); self.unread(root,['one','one','old','unknown'])
+            local=LocalTelemetry(root)
+            s=local.snapshot(); self.assertEqual(s['status'],'notification')
+            self.assertEqual(s['taskTitle'],'演示任务'); self.assertEqual(s['notificationCount'],1)
+            (root/'.codex-global-state.json').write_text('{',encoding='utf-8')
+            s=local.snapshot(); self.assertEqual(s['status'],'notification'); self.assertEqual(s['notificationReadErrors'],1)
+            self.unread(root,[]); self.assertEqual(local.snapshot()['status'],'idle')
+
+    def test_question_has_priority_over_unread_and_busy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); self.setup_catalog(root); self.unread(root,['one'])
+            (root/'one.jsonl').write_text('',encoding='utf-8')
+            local=LocalTelemetry(root); local.snapshot()
+            r=local.rollouts[root/'one.jsonl']; self.ask(r)
+            r.active=True
+            s=local.snapshot(); self.assertEqual(s['status'],'needs_input')
+            self.assertEqual(s['notificationCount'],1)
+            self.answer(r); self.assertEqual(local.snapshot()['status'],'notification')
+            self.unread(root,[]); self.assertEqual(local.snapshot()['status'],'working')
+
+    def test_unread_inbox_disappears_when_codex_marks_it_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); (root/'sqlite').mkdir(); db=root/'sqlite/codex-dev.db'
+            with closing(sqlite3.connect(db)) as c, c:
+                c.execute('CREATE TABLE inbox_items(id,title,thread_id,read_at,created_at)')
+                c.execute('INSERT INTO inbox_items VALUES(?,?,?,?,?)',('demo','演示收件箱',None,None,1))
+            local=LocalTelemetry(root); self.assertEqual(local.snapshot()['status'],'notification')
+            with closing(sqlite3.connect(db)) as c, c: c.execute('UPDATE inbox_items SET read_at=1')
+            self.assertEqual(local.snapshot()['status'],'idle')
 
 
 class TelemetryTests(unittest.TestCase):
