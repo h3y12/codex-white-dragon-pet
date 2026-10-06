@@ -76,28 +76,32 @@ $thinkingPose = Load-Pose 'dragon-thinking.png'
 $letterPose = Load-Pose 'dragon-letter.png'
 $parts.Dragon.Source = $idlePose
 $screen = [System.Windows.SystemParameters]::WorkArea
+function Sync-PetLayout {
+ # Measure the content at the selected width; no reserved space for other states.
+ $parts.Root.Measure([Windows.Size]::new($window.Width, [double]::PositiveInfinity))
+ if ($window.IsVisible) { $window.UpdateLayout() }
+}
 function Set-PetSize([double]$size) {
  $defaults.Scale = $size
  $parts.Dragon.Width = 212 * $size; $parts.Dragon.Height = 294 * $size
- $cardRow = 232 + 12 * ($defaults.FontSize - 14) + 3.4 * $defaults.FontSize
- $parts.Root.RowDefinitions[0].Height = [Windows.GridLength]::new($cardRow)
  $window.Width = 304 + 12 * ($defaults.FontSize - 14)
- $window.Height = $cardRow + 294 * $size + 10
+ Sync-PetLayout
 }
 Set-PetSize $defaults.Scale
 $window.Left = if ($null -ne $defaults.Left) { $defaults.Left } else { $screen.Right - $window.Width - 26 }
-$window.Top = if ($null -ne $defaults.Top) { $defaults.Top } else { $screen.Bottom - $window.Height - 18 }
+$window.Top = if ($null -ne $defaults.Top) { $defaults.Top } else { $screen.Bottom - $parts.Root.DesiredSize.Height - 18 }
 function Keep-InWorkArea {
  $handle = [Windows.Interop.WindowInteropHelper]::new($window).Handle
  if ($handle -eq [IntPtr]::Zero) { return }
  $area = [PetDpi]::GetWorkArea($handle)
  if ($area) {
   $window.Left = [Math]::Max($area[0], [Math]::Min($window.Left, $area[2] - $window.Width))
-  $window.Top = [Math]::Max($area[1], [Math]::Min($window.Top, $area[3] - $window.Height))
+  $window.Top = [Math]::Max($area[1], [Math]::Min($window.Top, $area[3] - $window.ActualHeight))
  }
 }
 $window.Add_SourceInitialized({ Keep-InWorkArea })
-$parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Hidden' }
+$window.Add_SizeChanged({ if ($window.IsVisible) { Keep-InWorkArea } })
+$parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }
 $parts.Card.Background = '#232230'
 $parts.Card.Opacity = $defaults.PanelOpacity / 100.0
 $window.Add_MouseLeftButtonDown({ if ($_.ChangedButton -eq 'Left') { try { $window.DragMove() } catch {} } })
@@ -189,7 +193,7 @@ $sizePanel.Children.Add($sizeSlider) | Out-Null
 $sizeItem.Header = $sizePanel
 $menu.Items.Add($sizeItem) | Out-Null
 $menu.Items.Add((New-Object Windows.Controls.Separator)) | Out-Null
-Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Hidden' } }
+Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings }
 Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation }
 Add-MenuItem $labels.refresh { $script:lastRaw = ''; Update-State }
 Add-MenuItem $labels.exit { $window.Close() }
@@ -220,6 +224,7 @@ function Update-State {
   $raw = [IO.File]::ReadAllText($StatePath, [Text.Encoding]::UTF8)
   if ($raw -eq $script:lastRaw) {
    Update-ResetLabels
+   Sync-PetLayout
    if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $script:lastUpdated -gt 15) { $parts.Heading.Text = $labels.disconnected }
    return
   }; $script:lastRaw = $raw
@@ -230,7 +235,7 @@ function Update-State {
   $isNotification = $state.status -in @('notification', 'needs_input')
   $parts.Dragon.Source = if ($isNotification) { $letterPose } elseif ($isIdle) { $idlePose } else { $thinkingPose }
   # A pending message remains visible even when the normal card is collapsed.
-  $parts.Card.Visibility = if ($isNotification -or $defaults.CardVisible) { 'Visible' } else { 'Hidden' }
+  $parts.Card.Visibility = if ($isNotification -or $defaults.CardVisible) { 'Visible' } else { 'Collapsed' }
   $parts.IdlePanel.Visibility = if ($isIdle) { 'Visible' } else { 'Collapsed' }
   $parts.BusyPanel.Visibility = if ($isIdle) { 'Collapsed' } else { 'Visible' }
   $parts.Heading.Text = $labels.($state.status)
@@ -274,6 +279,7 @@ function Update-State {
   $tooltipText.Text = $tip; $tooltipText.FontSize = $defaults.FontSize; $tooltipText.MaxWidth = 440; $tooltipText.TextWrapping = 'Wrap'
   $parts.Card.ToolTip = $tooltipText
   if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.updatedAt -gt 15) { $parts.Heading.Text = $labels.disconnected }
+  Sync-PetLayout
   if (-not $PreviewOnly) {
    $dpi = [Windows.Media.VisualTreeHelper]::GetDpi($window)
    $uiState = @{ processId = $PID; scale = $defaults.Scale; status = $script:status; pose = $(if ($isNotification) { 'letter' } elseif ($isIdle) { 'idle' } else { 'thinking' }); notificationCount = $state.notificationCount; visible = $window.IsVisible; updatedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); dpiScale = $dpi.DpiScaleX; perMonitorV2 = [PetDpi]::AreDpiAwarenessContextsEqual([PetDpi]::GetThreadDpiAwarenessContext(), [IntPtr]::new(-4)); fontSize = $defaults.FontSize; fontMin = 10; fontMax = 18; panelOpacity = $defaults.PanelOpacity; primaryReset = $parts.PrimaryReset.Text; secondaryReset = $parts.SecondaryReset.Text }
@@ -294,6 +300,7 @@ $stateTimer.Add_Tick({
   $parts.Card.ToolTip = $labels.collectorHelp
   $workerError = $script:worker.StandardError.ReadToEnd()
   if ($workerError) { [IO.File]::WriteAllText((Join-Path $runtime 'collector-error.txt'), $workerError, [Text.Encoding]::UTF8) }
+  Sync-PetLayout
   return
  }
  Update-State

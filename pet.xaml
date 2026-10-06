@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Title="白龙娘 · Codex" Width="304" Height="418.4" WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" UseLayoutRounding="True" SnapsToDevicePixels="True">
+ Title="白龙娘 · Codex" Width="304" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" UseLayoutRounding="True" SnapsToDevicePixels="True">
  <Grid x:Name="Root" Background="Transparent" TextElement.FontFamily="Microsoft YaHei UI" TextElement.FontSize="14">
-  <Grid.RowDefinitions><RowDefinition Height="232"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <Border x:Name="Card" Margin="6,8,6,0" Padding="14,12" CornerRadius="18" Background="#F5232230" BorderBrush="#756D628C" BorderThickness="1" VerticalAlignment="Top">
    <StackPanel>
     <DockPanel Margin="0,0,0,10">
@@ -25,7 +25,7 @@
     </StackPanel>
    </StackPanel>
   </Border>
-  <Image x:Name="Dragon" Grid.Row="1" Width="127.2" Height="176.4" Stretch="Uniform" VerticalAlignment="Bottom" Margin="0,0,0,5" RenderTransformOrigin="0.5,1" RenderOptions.BitmapScalingMode="HighQuality">
+  <Image x:Name="Dragon" Grid.Row="1" Width="127.2" Height="176.4" Stretch="Uniform" VerticalAlignment="Top" Margin="0,5,0,5" RenderTransformOrigin="0.5,1" RenderOptions.BitmapScalingMode="HighQuality">
    <Image.RenderTransform><TransformGroup><ScaleTransform x:Name="Breath"/><TranslateTransform x:Name="Float"/></TransformGroup></Image.RenderTransform>
   </Image>
  </Grid>
