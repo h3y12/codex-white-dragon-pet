@@ -93,14 +93,15 @@ class NotificationTests(unittest.TestCase):
     def test_question_has_priority_over_unread_and_busy(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); self.setup_catalog(root); self.unread(root,['one'])
-            (root/'one.jsonl').write_text('',encoding='utf-8')
-            local=LocalTelemetry(root); local.snapshot()
+            (root/'one.jsonl').write_text(json.dumps(self.event({'id':'one'},'session_meta'))+'\n',encoding='utf-8')
+            now=dt.datetime(2026,10,6,9,tzinfo=BEIJING).timestamp()
+            local=LocalTelemetry(root); local.snapshot(now)
             r=local.rollouts[root/'one.jsonl']; self.ask(r)
             r.active=True
-            s=local.snapshot(); self.assertEqual(s['status'],'needs_input')
+            s=local.snapshot(now); self.assertEqual(s['status'],'needs_input')
             self.assertEqual(s['notificationCount'],1)
-            self.answer(r); self.assertEqual(local.snapshot()['status'],'notification')
-            self.unread(root,[]); self.assertEqual(local.snapshot()['status'],'working')
+            self.answer(r); self.assertEqual(local.snapshot(now)['status'],'notification')
+            self.unread(root,[]); self.assertEqual(local.snapshot(now)['status'],'working')
 
     def test_unread_inbox_disappears_when_codex_marks_it_read(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -172,6 +173,20 @@ class TelemetryTests(unittest.TestCase):
             r.consume(self.event('2026-10-06T01:00:00Z', 'response_item', {'type': 'custom_tool_call', 'name': 'functions.exec', 'call_id': 'code', 'input': 'write file containing require_escalated'}))
             self.assertFalse(r.pending)
 
+
+    def test_mirrored_logs_count_one_active_conversation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); (root/'sessions').mkdir(); (root/'archived_sessions').mkdir()
+            events=[self.event('2026-10-06T01:00:00Z','session_meta',{'id':'same'}),
+                    self.event('2026-10-06T01:00:01Z','event_msg',{'type':'task_started'})]
+            a=root/'sessions/a.jsonl'; b=root/'archived_sessions/mirror.jsonl'
+            self.write(a,events); self.write(b,events)
+            local=LocalTelemetry(root); now=dt.datetime(2026,10,6,10,tzinfo=BEIJING).timestamp()
+            self.assertEqual(local.snapshot(now)['activeCount'],1)
+            # The current copy's completion supersedes an older active mirror.
+            self.write(a,events+[self.event('2026-10-06T01:01:00Z','event_msg',{'type':'task_complete'})])
+            state=local.snapshot(now)
+            self.assertEqual(state['activeCount'],0); self.assertEqual(state['status'],'idle')
 
     def test_latest_request_replaces_initial_title(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -354,6 +369,156 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(poller.snapshot()['rateLimits']['primary']['usedPercent'], 10)
             poller.close()
         reader.close.assert_called_once()
+
+
+class AccountSafetyTests(unittest.TestCase):
+    def test_error_numbers_are_not_mistaken_for_http_status(self):
+        error = collector.AccountReadError({'code': -32000,
+            'message': 'request 403 failed after 429 bytes', 'data': {'requestId': 401}})
+        self.assertIsNone(error.status)
+        self.assertEqual(error.category, 'endpoint_error')
+        structured = collector.AccountReadError({'code': -32000, 'message': 'denied',
+            'data': {'httpStatus': 403}})
+        self.assertEqual(structured.category, 'auth_or_access')
+
+    def poll_cycles(self, reader, count):
+        clock = [0]
+        delays = []
+        with mock.patch.object(collector.threading, 'Thread'):
+            poller = collector.AccountPoller(Path('.'))
+        def wait(delay=None):
+            delays.append(delay)
+            clock[0] += delay or 0
+            if len(delays) >= count or delay is None:
+                poller.stop_event.set()
+            return poller.stop_event.is_set()
+        poller.stop_event.wait = wait
+        with mock.patch.object(collector, 'AccountReader', return_value=reader), \
+                mock.patch.object(collector.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(collector.random, 'uniform', return_value=0):
+            poller._poll()
+        return poller.snapshot(), delays
+
+    def test_failures_back_off_and_recovery_restores_interval(self):
+        reader = mock.Mock()
+        reader.call.side_effect = [TimeoutError(), TimeoutError(), TimeoutError(),
+            {'rateLimits': {'primary': {'usedPercent': 10}}}, {'dailyUsageBuckets': []}]
+        state, delays = self.poll_cycles(reader, 4)
+        self.assertEqual(delays, [60, 120, 240, 60])
+        self.assertTrue(state['accountConnected'])
+        self.assertIn('resolvedAt', state['lastAccountError'])
+        self.assertEqual(state['lastAccountError']['category'], 'timeout')
+
+    def test_auth_error_pauses_without_reconnecting(self):
+        reader = mock.Mock()
+        reader.call.side_effect = collector.AccountReadError({'code': -32000,
+            'message': 'HTTP 401 refresh_token_reused secret-token'})
+        state, delays = self.poll_cycles(reader, 10)
+        self.assertEqual(delays, [None])
+        self.assertTrue(state['accountPaused'])
+        self.assertIsNone(state['accountNextRetryAt'])
+        self.assertNotIn('secret-token', json.dumps(state))
+        reader.call.assert_called_once_with('account/rateLimits/read')
+        reader.close.assert_called_once()
+
+    def test_unsupported_usage_is_disabled_and_quota_keeps_refreshing(self):
+        reader = mock.Mock()
+        def call(method):
+            if method == 'account/usage/read':
+                raise collector.AccountReadError({'code': -32601, 'message': 'Method not found'})
+            return {'rateLimits': {'primary': {'usedPercent': 10}}}
+        reader.call.side_effect = call
+        state, delays = self.poll_cycles(reader, 5)
+        self.assertEqual(delays, [60] * 5)
+        self.assertEqual(reader.call.call_args_list.count(mock.call('account/usage/read')), 1)
+        self.assertTrue(state['accountConnected'])
+        self.assertFalse(state['accountPaused'])
+
+    def test_successful_queries_keep_original_one_minute_frequency(self):
+        reader = mock.Mock(return_value={})
+        reader.call.return_value = {}
+        _, delays = self.poll_cycles(reader, 7)
+        self.assertEqual(delays, [60] * 7)
+        self.assertEqual(reader.call.call_args_list.count(mock.call('account/rateLimits/read')), 7)
+        self.assertEqual(reader.call.call_args_list.count(mock.call('account/usage/read')), 7)
+
+    def test_usage_access_denied_pauses_entire_account_connection(self):
+        reader = mock.Mock()
+        reader.call.side_effect = [{}, collector.AccountReadError({'message': 'HTTP 403 Forbidden'})]
+        state, delays = self.poll_cycles(reader, 4)
+        self.assertEqual(delays, [None])
+        self.assertTrue(state['accountPaused'])
+        self.assertFalse(state['accountConnected'])
+        self.assertEqual(state['lastUsageError']['httpStatus'], 403)
+
+    def test_local_only_never_starts_account_poller(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(collector, 'AccountPoller') as poll:
+            args = argparse.Namespace(codex_home=temp, state=str(Path(temp) / 'state.json'),
+                stop=None, local_only=True, once=True)
+            collector.run(args)
+            poll.assert_not_called()
+            self.assertTrue(json.loads(Path(args.state).read_text())['localOnly'])
+
+    def test_rate_limit_waits_for_service_delay_then_recovers(self):
+        reader = mock.Mock()
+        reader.call.side_effect = [collector.AccountReadError({'message': 'HTTP 429 Too Many Requests',
+            'data': {'retryAfterSeconds': 1200}}), {}, {}]
+        state, delays = self.poll_cycles(reader, 2)
+        self.assertEqual(delays, [1200, 60])
+        self.assertFalse(state['accountPaused'])
+        self.assertTrue(state['accountConnected'])
+
+    def test_repeated_failures_are_capped_and_optional_failure_backs_off(self):
+        with mock.patch.object(collector.random, 'uniform', return_value=15):
+            self.assertEqual(collector.retry_delay(100), 900)
+        reader = mock.Mock()
+        def call(method):
+            if method == 'account/usage/read':
+                raise TimeoutError('sensitive server text')
+            return {}
+        reader.call.side_effect = call
+        state, delays = self.poll_cycles(reader, 7)
+        self.assertEqual(delays, [60] * 7)
+        self.assertEqual(reader.call.call_args_list.count(mock.call('account/usage/read')), 3)
+        self.assertNotIn('sensitive server text', json.dumps(state))
+
+    def test_rpc_error_keeps_only_safe_metadata(self):
+        reader = collector.AccountReader.__new__(collector.AccountReader)
+        reader.stop_event = threading.Event(); reader.closed = threading.Event()
+        reader.messages = queue.Queue(); reader.serial = 0; reader.process = mock.Mock()
+        reader.messages.put({'id': 1, 'error': {'code': -32000, 'message': 'HTTP 403 secret-value'}})
+        with self.assertRaises(collector.AccountReadError) as raised:
+            reader.call('account/rateLimits/read')
+        error = raised.exception
+        self.assertEqual(error.category, 'auth_or_access')
+        self.assertEqual(error.status, 403)
+        self.assertNotIn('secret-value', str(error))
+
+
+class CatalogSafetyTests(unittest.TestCase):
+    def test_null_rollout_path_does_not_stop_local_telemetry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with closing(sqlite3.connect(root / 'state_5.sqlite')) as db, db:
+                db.execute('CREATE TABLE threads(id,title,rollout_path,archived)')
+                db.execute('INSERT INTO threads VALUES(?,?,?,?)', ('cloud', None, None, 0))
+            local = LocalTelemetry(root)
+            self.assertEqual(local.snapshot()['status'], 'idle')
+            self.assertIn('cloud', local.eligible_threads)
+
+    def test_catalog_error_preserves_last_complete_catalog(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with closing(sqlite3.connect(root / 'state_5.sqlite')) as db, db:
+                db.execute('CREATE TABLE threads(id,title,rollout_path,archived)')
+                db.execute('INSERT INTO threads VALUES(?,?,?,?)', ('one', 'title', None, 0))
+            local = LocalTelemetry(root); local.discover()
+            with closing(sqlite3.connect(root / 'state_5.sqlite')) as db, db:
+                db.execute('DROP TABLE threads')
+            local.discover()
+            self.assertEqual(local.eligible_threads, {'one'})
+            self.assertEqual(local.titles, {'one': 'title'})
+            self.assertGreater(local.read_errors, 0)
 
 
 if __name__ == '__main__':

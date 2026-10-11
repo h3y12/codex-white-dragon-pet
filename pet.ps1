@@ -1,7 +1,8 @@
-param([switch]$PreviewOnly, [string]$RenderPath, [string]$StatePath, [double]$PreviewDpiScale = 1.0, [double]$PreviewPetScale = 0, [double]$PreviewFontSize = 0, [double]$PreviewPanelOpacity = 0, [string]$PreviewPlanExpiry = '')
+param([switch]$PreviewOnly, [switch]$LocalOnly, [string]$RenderPath, [string]$StatePath, [double]$PreviewDpiScale = 1.0, [double]$PreviewPetScale = 0, [double]$PreviewFontSize = 0, [double]$PreviewPanelOpacity = 0, [string]$PreviewPlanExpiry = '')
 $ErrorActionPreference = 'Stop'
 trap {
  $errorMessage = $_.Exception.Message
+ try { if ($script:tray) { $script:tray.Visible = $false; $script:tray.Dispose() } } catch {}
  $errorFolder = Join-Path $PSScriptRoot 'runtime'
  try {
   [IO.Directory]::CreateDirectory($errorFolder) | Out-Null
@@ -20,6 +21,7 @@ public static class PetDpi {
  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
  [DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
  [DllImport("user32.dll")] public static extern bool AreDpiAwarenessContextsEqual(IntPtr a, IntPtr b);
+ [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
  [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int Size; public RECT Monitor; public RECT Work; public uint Flags; }
  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
@@ -39,18 +41,35 @@ try {
 } catch {}
 [AppContext]::SetSwitch('Switch.System.Windows.DoNotScaleForDpiChanges', $false)
 [AppContext]::SetSwitch('Switch.System.Windows.DoNotUsePresentationDpiCapabilityTier2OrGreater', $false)
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 $petRoot = $PSScriptRoot
 $runtime = Join-Path $petRoot 'runtime'
 [IO.Directory]::CreateDirectory($runtime) | Out-Null
 $mutex = New-Object Threading.Mutex($false, 'Local\CodexWhiteDragonPet')
-if (-not $PreviewOnly -and -not $mutex.WaitOne(0)) { exit }
+if (-not $PreviewOnly) {
+ try { if (-not $mutex.WaitOne(0)) { $mutex.Dispose(); exit } }
+ catch [Threading.AbandonedMutexException] { } # The new process owns the abandoned lock.
+}
 $stopPath = Join-Path $runtime ('stop-' + [Guid]::NewGuid().ToString('N'))
 if (-not $StatePath) { $StatePath = Join-Path $runtime 'state.json' }
 $settingsPath = Join-Path $runtime 'settings.json'
 $defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = '' }
 if (Test-Path -LiteralPath $settingsPath) {
- try { $saved = [IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json; foreach ($key in @($defaults.Keys)) { if ($null -ne $saved.$key) { $defaults[$key] = $saved.$key } } } catch {}
+ try {
+  $saved = [IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+  foreach ($key in @($defaults.Keys)) {
+   $value = $saved.$key
+   if ($null -eq $value) { continue }
+   if ($key -in @('Animation','CardVisible')) {
+    if ($value -is [bool]) { $defaults[$key] = $value }
+   } elseif ($key -eq 'PlanExpiry') {
+    if ($value -is [string]) { $defaults[$key] = $value }
+   } elseif ($value -is [ValueType] -and $value -isnot [bool]) {
+    $numeric = [double]$value
+    if (-not [double]::IsNaN($numeric) -and -not [double]::IsInfinity($numeric)) { $defaults[$key] = $numeric }
+   }
+  }
+ } catch {}
 }
 # Migrate the initial-release unset-position sentinel. Other negative coordinates are valid.
 if ($defaults.Left -eq -1 -and $defaults.Top -eq -1) { $defaults.Left = $null; $defaults.Top = $null }
@@ -65,7 +84,7 @@ $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
 $reader = New-Object Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $parts = @{}
-foreach ($name in @('Root','Card','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
+foreach ($name in @('Root','Card','NotificationFrame','NotificationSweep','SweepRotation','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
 function Load-Pose([string]$filename) {
  $bitmap = New-Object Windows.Media.Imaging.BitmapImage
  $imageStream = [IO.File]::OpenRead((Join-Path $petRoot ('assets/' + $filename)))
@@ -232,15 +251,100 @@ $expiryItem.Header = $expiryPanel
 $menu.Items.Add($expiryItem) | Out-Null
 $menu.Items.Add((New-Object Windows.Controls.Separator)) | Out-Null
 Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings }
-Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation }
+Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation; Update-NotificationOutline }
 Add-MenuItem $labels.refresh { $script:lastRaw = ''; Update-State }
+Add-MenuItem $labels.hidePet { Hide-PetWindow }
+$autostartItem = New-Object Windows.Controls.MenuItem
+$autostartItem.Header = $labels.autostart
+$autostartItem.IsCheckable = $true
+Import-Module (Join-Path $petRoot 'autostart.psm1') -Force
+$autostartItem.IsChecked = Test-PetAutostart $petRoot
+$autostartItem.Add_Click({
+ try {
+  if ($autostartItem.IsChecked) { & (Join-Path $petRoot 'Set-Autostart.ps1') | Out-Null }
+  else { & (Join-Path $petRoot 'Set-Autostart.ps1') -Disable | Out-Null }
+ } catch { [Windows.MessageBox]::Show($_.Exception.Message, $labels.autostart) | Out-Null }
+ $autostartItem.IsChecked = Test-PetAutostart $petRoot
+})
+$menu.Items.Add($autostartItem) | Out-Null
 Add-MenuItem $labels.exit { $window.Close() }
 $window.ContextMenu = $menu
+function Dispose-PetTray {
+ if ($script:tray) { $script:tray.Visible = $false; $script:tray.Dispose(); $script:tray = $null }
+ if ($script:trayMenu) { $script:trayMenu.Dispose(); $script:trayMenu = $null }
+ if ($script:trayIcon) { $script:trayIcon.Dispose(); $script:trayIcon = $null }
+}
+function Show-PetWindow {
+ $window.Show(); Sync-PetLayout; Keep-InWorkArea
+ $window.Activate() | Out-Null
+}
+function Hide-PetWindow {
+ Save-Settings
+ $window.Hide()
+}
+function Initialize-PetTray {
+ $script:tray = New-Object System.Windows.Forms.NotifyIcon
+ # Create a small native icon from the existing pose without locking the PNG.
+ $source = $small = $graphics = $null; $iconHandle = [IntPtr]::Zero
+ try {
+  $source = [Drawing.Image]::FromFile((Join-Path $petRoot 'assets/dragon-idle.png'))
+  $small = [Drawing.Bitmap]::new(32,32)
+  $graphics = [Drawing.Graphics]::FromImage($small)
+  $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $iconWidth = [int][Math]::Round(32.0 * $source.Width / $source.Height)
+  $graphics.DrawImage($source, [Drawing.Rectangle]::new([int]((32-$iconWidth)/2),0,$iconWidth,32))
+  $iconHandle = $small.GetHicon()
+  $script:trayIcon = [Drawing.Icon]::FromHandle($iconHandle).Clone()
+ } finally {
+  if ($iconHandle -ne [IntPtr]::Zero) { [PetDpi]::DestroyIcon($iconHandle) | Out-Null }
+  if ($graphics) { $graphics.Dispose() }; if ($small) { $small.Dispose() }; if ($source) { $source.Dispose() }
+ }
+ $script:tray.Icon = $script:trayIcon
+ $script:tray.Text = $labels.trayTitle
+ $script:trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+ $script:trayShow = New-Object System.Windows.Forms.ToolStripMenuItem
+ $script:trayShow.Text = $labels.showPet
+ $script:trayShow.Add_Click({ Show-PetWindow })
+ $script:trayHide = New-Object System.Windows.Forms.ToolStripMenuItem
+ $script:trayHide.Text = $labels.hidePet
+ $script:trayHide.Add_Click({ Hide-PetWindow })
+ $script:trayExit = New-Object System.Windows.Forms.ToolStripMenuItem
+ $script:trayExit.Text = $labels.exit
+ $script:trayExit.Add_Click({ $window.Close() })
+ $script:trayMenu.Items.Add($script:trayShow) | Out-Null
+ $script:trayMenu.Items.Add($script:trayHide) | Out-Null
+ $script:trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+ $script:trayMenu.Items.Add($script:trayExit) | Out-Null
+ $script:trayMenu.Add_Opening({ $script:trayShow.Enabled = -not $window.IsVisible; $script:trayHide.Enabled = $window.IsVisible })
+ $script:tray.ContextMenuStrip = $script:trayMenu
+ $script:tray.Add_MouseDoubleClick({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-PetWindow } })
+ $script:tray.Visible = $true
+}
 $script:lastRaw = ''
 $script:status = 'idle'
 $script:lastUpdated = 0
 $script:primaryBucket = $null
 $script:secondaryBucket = $null
+function Update-NotificationOutline {
+ $notification = $script:status -in @('notification', 'needs_input')
+ $parts.NotificationFrame.Visibility = if ($notification) { 'Visible' } else { 'Collapsed' }
+ $moving = $notification -and $window.IsVisible -and $defaults.Animation -and [Windows.SystemParameters]::ClientAreaAnimation
+ $sweep = $parts.NotificationSweep
+ $sweep.Visibility = if ($moving) { 'Visible' } else { 'Collapsed' }
+ if ($moving) {
+  if (-not $script:glowRunning) {
+   $animation = [Windows.Media.Animation.DoubleAnimation]::new(0, 360, [Windows.Duration]::new([TimeSpan]::FromSeconds(6)))
+   $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+   $parts.SweepRotation.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $animation)
+   $script:glowRunning = $true
+  }
+ } else {
+  $parts.SweepRotation.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $null)
+  $script:glowRunning = $false
+ }
+}
+$parts.NotificationSweep.Add_SizeChanged({ Update-NotificationOutline })
+$window.Add_IsVisibleChanged({ Update-NotificationOutline })
 function Reset-Label($bucket, [bool]$weekly = $false, [long]$now = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) {
  $remainingLabel = if ($weekly) { $labels.weeklyRemaining } else { $labels.primaryRemaining }
  if ($bucket -and [double]$bucket.resetsAt -gt 0) {
@@ -279,8 +383,8 @@ function Update-State {
   $parts.BusyPanel.Visibility = if ($isIdle) { 'Collapsed' } else { 'Visible' }
   $parts.Heading.Text = $labels.($state.status)
   if (-not $parts.Heading.Text) { $parts.Heading.Text = $labels.working }
-  $parts.StatusDot.Fill = if ($isNotification) { '#F3C36E' } elseif ($state.status -eq 'error') { '#F295AD' } else { '#B8A8E8' }
-  $parts.Card.BorderBrush = if ($isNotification) { '#D2B177' } else { '#74688E' }
+  $parts.StatusDot.Fill = if ($isNotification) { '#FFD451' } elseif ($state.status -eq 'error') { '#F295AD' } else { '#B8A8E8' }
+  $parts.Card.BorderBrush = if ($isNotification) { 'Transparent' } else { '#74688E' }
   $parts.Tokens.Text = ([long]$state.todayTokens).ToString('N0')
   $parts.Footnote.Text = $labels.localDate + ' ' + $state.date
   if ($state.readErrors -gt 0) { $parts.Footnote.Text += ' ' + $labels.partial }
@@ -295,10 +399,14 @@ function Update-State {
   $expiredP = $null -ne $p -and [double]$p.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$p.resetsAt
   $expiredS = $null -ne $s -and [double]$s.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$s.resetsAt
   # Rollout fallback uses snake_case; live account endpoint uses camelCase.
-  if ($p -and $null -eq $p.usedPercent) { $p | Add-Member NoteProperty usedPercent $p.used_percent; $p | Add-Member NoteProperty resetsAt $p.resets_at; $expiredP = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$p.resetsAt }
-  if ($s -and $null -eq $s.usedPercent) { $s | Add-Member NoteProperty usedPercent $s.used_percent; $s | Add-Member NoteProperty resetsAt $s.resets_at; $expiredS = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$s.resetsAt }
-  $pr = if ($null -ne $p -and -not $expiredP) { [Math]::Max(0, [Math]::Min(100, 100 - [double]$p.usedPercent)) } else { $null }
-  $sr = if ($null -ne $s -and -not $expiredS) { [Math]::Max(0, [Math]::Min(100, 100 - [double]$s.usedPercent)) } else { $null }
+  if ($p -and $null -ne $p.used_percent) { $p | Add-Member NoteProperty usedPercent $p.used_percent -Force }
+  if ($s -and $null -ne $s.used_percent) { $s | Add-Member NoteProperty usedPercent $s.used_percent -Force }
+  if ($p -and $null -ne $p.resets_at) { $p | Add-Member NoteProperty resetsAt $p.resets_at -Force }
+  if ($s -and $null -ne $s.resets_at) { $s | Add-Member NoteProperty resetsAt $s.resets_at -Force }
+  $expiredP = $p -and [double]$p.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$p.resetsAt
+  $expiredS = $s -and [double]$s.resetsAt -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [double]$s.resetsAt
+  $pr = if ($p -and $null -ne $p.usedPercent -and -not $expiredP) { [Math]::Max(0, [Math]::Min(100, 100 - [double]$p.usedPercent)) } else { $null }
+  $sr = if ($s -and $null -ne $s.usedPercent -and -not $expiredS) { [Math]::Max(0, [Math]::Min(100, 100 - [double]$s.usedPercent)) } else { $null }
   $pt = if ($null -eq $pr) { '--' } else { '{0:0}%' -f $pr }
   $st = if ($null -eq $sr) { '--' } else { '{0:0}%' -f $sr }
   $parts.Quota.Text = $pt
@@ -310,6 +418,9 @@ function Update-State {
   $script:primaryBucket = $p; $script:secondaryBucket = $s
   Update-ResetLabels
   $tip = $labels.coverage -f $state.localCoverage, $state.cachedTokens, $state.outputTokens
+  if ($state.localOnly) { $tip += "`n" + $labels.localOnly }
+  elseif ($state.accountPaused) { $tip += "`n" + $labels.accountPaused }
+  elseif (-not $state.accountConnected -and $state.lastAccountError) { $tip += "`n" + $labels.accountRetry }
   if ($null -ne $state.officialDayTokens) { $tip += "`n" + ($labels.official -f ([long]$state.officialDayTokens).ToString('N0')) }
   if ($isNotification) { $tip = $labels.messageAction + "`n" + $tip }
   if ($state.notificationReadErrors -gt 0) { $tip += "`n" + $labels.notificationPartial }
@@ -321,6 +432,7 @@ function Update-State {
   $parts.Card.ToolTip = $tooltipText
   if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.updatedAt -gt 15) { $parts.Heading.Text = $labels.disconnected }
   Sync-PetLayout
+  Update-NotificationOutline
   if (-not $PreviewOnly) {
    $dpi = [Windows.Media.VisualTreeHelper]::GetDpi($window)
    $uiState = @{ processId = $PID; scale = $defaults.Scale; status = $script:status; pose = $(if ($isNotification) { 'letter' } elseif ($isIdle) { 'idle' } else { 'thinking' }); notificationCount = $state.notificationCount; visible = $window.IsVisible; updatedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); dpiScale = $dpi.DpiScaleX; perMonitorV2 = [PetDpi]::AreDpiAwarenessContextsEqual([PetDpi]::GetThreadDpiAwarenessContext(), [IntPtr]::new(-4)); fontSize = $defaults.FontSize; fontMin = 10; fontMax = 18; panelOpacity = $defaults.PanelOpacity; primaryReset = $parts.PrimaryReset.Text; secondaryReset = $parts.SecondaryReset.Text }
@@ -328,6 +440,7 @@ function Update-State {
   }
  } catch { $parts.Heading.Text = $labels.reading }
 }
+if (-not $PreviewOnly) { Initialize-PetTray }
 $stateTimer = New-Object Windows.Threading.DispatcherTimer
 $stateTimer.Interval = [TimeSpan]::FromSeconds(1)
 $stateTimer.Add_Tick({
@@ -350,7 +463,7 @@ $watch = [Diagnostics.Stopwatch]::StartNew()
 $motionTimer = New-Object Windows.Threading.DispatcherTimer
 $motionTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $motionTimer.Add_Tick({
- if ($defaults.Animation -and -not [Windows.SystemParameters]::ClientAreaAnimation) { $defaults.Animation = $false }
+ if ($defaults.Animation -and -not [Windows.SystemParameters]::ClientAreaAnimation) { $defaults.Animation = $false; Update-NotificationOutline }
  if ($defaults.Animation) {
   $speed = if ($script:status -eq 'idle') { 1.6 } else { 2.6 }
   $wave = [Math]::Sin($watch.Elapsed.TotalSeconds * $speed)
@@ -367,12 +480,15 @@ if (-not $PreviewOnly) {
  $workerInfo = New-Object Diagnostics.ProcessStartInfo
  $workerInfo.FileName = $python
  $workerInfo.Arguments = '"' + (Join-Path $petRoot 'collector.py') + '" --state "' + $StatePath + '" --stop "' + $stopPath + '"'
+ if ($LocalOnly) { $workerInfo.Arguments += ' --local-only' }
  $workerInfo.UseShellExecute = $false; $workerInfo.CreateNoWindow = $true; $workerInfo.WorkingDirectory = $petRoot
  $workerInfo.RedirectStandardError = $true
  $script:worker = [Diagnostics.Process]::Start($workerInfo)
 }
 $window.Add_Closed({
  $stateTimer.Stop(); $motionTimer.Stop()
+ $parts.SweepRotation.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $null)
+ Dispose-PetTray
  if (-not $PreviewOnly) {
   [IO.File]::WriteAllText($stopPath, 'stop')
   $defaults.Left = $window.Left; $defaults.Top = $window.Top
@@ -389,6 +505,7 @@ $window.Add_Closed({
   try { $mutex.ReleaseMutex() } catch {}
  }
  $mutex.Dispose()
+ if (-not $RenderPath) { $window.Dispatcher.InvokeShutdown() }
 })
 Update-State
 if ($RenderPath) {
@@ -405,4 +522,8 @@ if ($RenderPath) {
  $encoder = New-Object Windows.Media.Imaging.PngBitmapEncoder
  $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($render))
  $outStream = [IO.File]::Create($RenderPath); $encoder.Save($outStream); $outStream.Close(); $window.Close()
-} else { $window.ShowDialog() | Out-Null }
+} else {
+ # A modal ShowDialog loop ends on Hide; keep dispatching until an explicit exit.
+ $window.Show()
+ [Windows.Threading.Dispatcher]::Run()
+}

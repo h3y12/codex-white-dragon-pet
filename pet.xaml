@@ -28,6 +28,26 @@
     </StackPanel>
    </StackPanel>
   </Border>
+  <Grid x:Name="NotificationFrame" Margin="6,8,6,0" Height="{Binding ActualHeight, ElementName=Card}" VerticalAlignment="Top" Visibility="Collapsed" IsHitTestVisible="False">
+   <Border CornerRadius="18" BorderBrush="#FFFFCE55" BorderThickness="3">
+    <Border.Effect><DropShadowEffect Color="#E9B854" BlurRadius="6" ShadowDepth="0" Opacity="0.65"/></Border.Effect>
+   </Border>
+   <Rectangle x:Name="NotificationSweep" Margin="1.5" RadiusX="16.5" RadiusY="16.5" StrokeThickness="3" Visibility="Collapsed">
+    <Rectangle.Stroke>
+     <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+      <LinearGradientBrush.RelativeTransform><RotateTransform x:Name="SweepRotation" CenterX="0.5" CenterY="0.5"/></LinearGradientBrush.RelativeTransform>
+      <GradientStop Color="#00FFF2B9" Offset="0"/>
+      <GradientStop Color="#00FFF2B9" Offset="0.24"/>
+      <GradientStop Color="#70FFF2B9" Offset="0.4"/>
+      <GradientStop Color="#FFFFF7DC" Offset="0.5"/>
+      <GradientStop Color="#70FFF2B9" Offset="0.6"/>
+      <GradientStop Color="#00FFF2B9" Offset="0.76"/>
+      <GradientStop Color="#00FFF2B9" Offset="1"/>
+     </LinearGradientBrush>
+    </Rectangle.Stroke>
+    <Rectangle.Effect><BlurEffect Radius="1.2"/></Rectangle.Effect>
+   </Rectangle>
+  </Grid>
   <Image x:Name="Dragon" Grid.Row="1" Width="127.2" Height="176.4" Stretch="Uniform" VerticalAlignment="Top" Margin="0,5,0,5" RenderTransformOrigin="0.5,1" RenderOptions.BitmapScalingMode="HighQuality">
    <Image.RenderTransform><TransformGroup><ScaleTransform x:Name="Breath"/><TranslateTransform x:Name="Float"/></TransformGroup></Image.RenderTransform>
   </Image>

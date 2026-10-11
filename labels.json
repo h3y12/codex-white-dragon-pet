@@ -1,6 +1,6 @@
 {
   "togglePanel": "显示／收起信息面板",
-  "toggleAnimation": "开启／关闭呼吸动画",
+  "toggleAnimation": "开启／关闭动画",
   "small": "小号",
   "medium": "中号",
   "large": "大号",
@@ -56,5 +56,12 @@
   "expired": "已到期",
   "resetCredits": "重置卡",
   "oldResetCredits": "重置卡（旧）",
-  "cardCount": "{0} 张"
+  "cardCount": "{0} 张",
+  "trayTitle": "白龙娘 · Codex 桌宠",
+  "showPet": "显示桌宠",
+  "hidePet": "隐藏桌宠",
+  "localOnly": "纯本地模式：额度来自本机会话记录",
+  "accountPaused": "账户查询已暂停；确认登录与访问权限后重启桌宠",
+  "accountRetry": "账户查询失败，已延长重试间隔",
+  "autostart": "随 Codex 启动"
 }

@@ -8,6 +8,7 @@ import tempfile
 import os
 from pathlib import Path
 import queue
+import random
 import re
 import shutil
 import sqlite3
@@ -266,15 +267,25 @@ class LocalTelemetry:
         if database.exists():
             try:
                 with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1)) as con:
-                    self.eligible_threads = set()
-                    self.catalog_available = True
+                    eligible = set()
+                    titles = {}
                     for row in con.execute('SELECT id, title, rollout_path, archived FROM threads'):
-                        self.titles[row[0]] = row[1]
+                        if not isinstance(row[0], str):
+                            self.read_errors += 1
+                            continue
+                        titles[row[0]] = row[1] if isinstance(row[1], str) else ''
                         if not row[3]:
-                            self.eligible_threads.add(row[0])
-                        path = Path(row[2])
-                        if path.exists():
-                            paths.add(path)
+                            eligible.add(row[0])
+                        if isinstance(row[2], str) and row[2]:
+                            try:
+                                path = Path(row[2])
+                                if path.is_file():
+                                    paths.add(path)
+                            except (OSError, ValueError):
+                                self.read_errors += 1
+                    self.eligible_threads = eligible
+                    self.titles = titles
+                    self.catalog_available = True
             except sqlite3.Error:
                 self.read_errors += 1
         # Archived and active copies can coexist; response IDs are deduplicated later.
@@ -296,6 +307,7 @@ class LocalTelemetry:
         waiting = []
         recent_error = None
         latest_requests = {}
+        task_rollouts = {}
         rate = None
         rate_time = 0
         errors = self.read_errors
@@ -323,6 +335,12 @@ class LocalTelemetry:
                 previous = latest_requests.get(rollout.session_id)
                 if previous is None or rollout.request_time > previous[0]:
                     latest_requests[rollout.session_id] = (rollout.request_time, rollout.current_request)
+            identity = rollout.session_id or ('file', str(rollout.path))
+            previous = task_rollouts.get(identity)
+            # Mirrored files describe one conversation; use its newest task state.
+            if previous is None or (rollout.last_event, rollout.request_time, not rollout.active) > (previous.last_event, previous.request_time, not previous.active):
+                task_rollouts[identity] = rollout
+        for rollout in task_rollouts.values():
             if (rollout.pending or rollout.async_pending) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
                 waiting.append(rollout)
             if rollout.active and now - rollout.last_event < 86400:
@@ -400,6 +418,51 @@ def desktop_notifications(home, eligible_threads):
     return notifications, errors
 
 
+class AccountReadError(RuntimeError):
+    """Keep actionable error metadata without retaining server text or credentials."""
+    def __init__(self, error):
+        data = error if isinstance(error, dict) else {}
+        code = data.get('code')
+        self.code = code if type(code) is int else None
+        detail = data.get('data') if isinstance(data.get('data'), dict) else {}
+        message = data.get('message')
+        text = message.lower() if isinstance(message, str) else ''
+        statuses = (401, 403, 429, 500, 502, 503, 504)
+        self.status = next((value for source in (detail, data)
+            for key in ('httpStatus', 'statusCode', 'status_code', 'status')
+            if type(value := source.get(key)) is int and value in statuses), None)
+        if self.status is None and self.code in statuses:
+            self.status = self.code
+        if self.status is None:
+            status = re.search(r'(?:\bhttp(?:/\d(?:\.\d)?)?\s+|\bstatus(?:\s+code)?\s*[:=]?\s*)(401|403|429|500|502|503|504)\b', text)
+            self.status = int(status.group(1)) if status else None
+        retry_after = detail.get('retryAfterSeconds', detail.get('retry_after', data.get('retryAfterSeconds')))
+        self.retry_after = number(retry_after)
+        if self.code == -32601:
+            self.category = 'unsupported'
+        elif self.status in (401, 403) or any(marker in text for marker in (
+                'refresh_token_reused', 'refresh_token_expired', 'refresh_token_invalid',
+                'unauthorized', 'not authenticated', 'authentication required', 'not logged in')):
+            self.category = 'auth_or_access'
+        elif self.status == 429:
+            self.category = 'rate_limited'
+        else:
+            self.category = 'endpoint_error'
+        super().__init__(self.category)
+
+
+def account_error(method, error):
+    return {'method': method, 'category': getattr(error, 'category',
+        'timeout' if isinstance(error, TimeoutError) else 'connection'),
+        'code': getattr(error, 'code', None), 'httpStatus': getattr(error, 'status', None),
+        'occurredAt': time.time()}
+
+
+def retry_delay(failures):
+    # Jitter spreads reconnections across clients; even the first retry waits a minute.
+    return min(900, 60 * 2 ** min(max(0, failures - 1), 4) + random.uniform(0, 15))
+
+
 class AccountReader:
     """Bounded, cancellable read-only stdio connection."""
     def __init__(self, home, stop_event=None):
@@ -464,7 +527,9 @@ class AccountReader:
             if response is None:
                 raise RuntimeError('Codex read connection closed')
             if response.get('id') == ident:
-                if 'error' in response or not isinstance(response.get('result', {}), dict):
+                if 'error' in response:
+                    raise AccountReadError(response['error'])
+                if not isinstance(response.get('result'), dict):
                     raise RuntimeError('Read endpoint unavailable or invalid result')
                 return response.get('result', {})
         raise TimeoutError('Codex read timed out')
@@ -501,6 +566,8 @@ class AccountPoller:
         self.ready = threading.Event()
         self.lock = threading.Lock()
         self.cache = {'rateLimits': None, 'rateUpdatedAt': 0, 'officialBuckets': None, 'accountConnected': False, 'resetCreditCount': None}
+        self.cache.update(accountPaused=False, accountNextRetryAt=None,
+            lastAccountError=None, lastUsageError=None)
         self.thread = threading.Thread(target=self._poll, daemon=True)
         self.thread.start()
 
@@ -510,35 +577,70 @@ class AccountPoller:
 
     def _poll(self):
         account = None
+        failures = usage_failures = 0
+        usage_due = 0
+        usage_disabled = False
         try:
             while not self.stop_event.is_set():
+                delay = 60
+                method = 'initialize'
                 try:
                     if account is None:
                         account = AccountReader(self.home, self.stop_event)
+                    method = 'account/rateLimits/read'
                     reply = account.call('account/rateLimits/read')
                     limits = reply.get('rateLimitsByLimitId')
                     rate = (limits.get('codex') if isinstance(limits, dict) else None) or reply.get('rateLimits')
                     with self.lock:
                         self.cache.update(rateLimits=rate if isinstance(rate, dict) else None,
                             rateUpdatedAt=time.time(), accountConnected=True, resetCreditCount=reset_credit_count(reply))
+                        if self.cache['lastAccountError'] and 'resolvedAt' not in self.cache['lastAccountError']:
+                            self.cache['lastAccountError'] = dict(self.cache['lastAccountError'], resolvedAt=time.time())
+                    failures = 0
                     self.ready.set()
-                    try:
-                        buckets = account.call('account/usage/read').get('dailyUsageBuckets')
-                        with self.lock:
-                            self.cache['officialBuckets'] = buckets if isinstance(buckets, list) else None
-                    except (OSError, RuntimeError, TimeoutError, queue.Empty):
-                        with self.lock:
-                            self.cache['officialBuckets'] = None
-                except (OSError, RuntimeError, TimeoutError, queue.Empty):
+                    if not usage_disabled and time.monotonic() >= usage_due:
+                        method = 'account/usage/read'
+                        try:
+                            buckets = account.call(method).get('dailyUsageBuckets')
+                            with self.lock:
+                                self.cache['officialBuckets'] = buckets if isinstance(buckets, list) else None
+                                if self.cache['lastUsageError'] and 'resolvedAt' not in self.cache['lastUsageError']:
+                                    self.cache['lastUsageError'] = dict(self.cache['lastUsageError'], resolvedAt=time.time())
+                            usage_failures = 0
+                            usage_due = time.monotonic() + 60
+                        except (OSError, RuntimeError, TimeoutError, queue.Empty) as error:
+                            with self.lock:
+                                self.cache['officialBuckets'] = None
+                                self.cache['lastUsageError'] = account_error(method, error)
+                            if getattr(error, 'category', None) == 'auth_or_access':
+                                raise
+                            usage_disabled = getattr(error, 'category', None) == 'unsupported'
+                            usage_failures += 1
+                            usage_delay = max(retry_delay(usage_failures), getattr(error, 'retry_after', 0))
+                            usage_due = time.monotonic() + usage_delay
+                            if getattr(error, 'category', None) == 'rate_limited':
+                                delay = max(delay, usage_delay)
+                except (OSError, RuntimeError, TimeoutError, queue.Empty) as error:
                     if account:
                         account.close()
                     account = None
                     with self.lock:
                         self.cache['accountConnected'] = False
                         self.cache['resetCreditCount'] = None
+                        self.cache['officialBuckets'] = None
+                        self.cache['lastAccountError'] = account_error(method, error)
+                        self.cache['accountPaused'] = getattr(error, 'category', None) in ('auth_or_access', 'unsupported')
+                    failures += 1
+                    delay = max(retry_delay(failures), getattr(error, 'retry_after', 0))
                 finally:
                     self.ready.set()
-                self.stop_event.wait(60)
+                with self.lock:
+                    paused = self.cache['accountPaused']
+                    self.cache['accountNextRetryAt'] = None if paused else time.time() + delay
+                if paused:
+                    self.stop_event.wait()
+                else:
+                    self.stop_event.wait(delay)
         finally:
             if account:
                 account.close()
@@ -582,8 +684,12 @@ def run(args):
             now = time.time()
             state = local.snapshot(now)
             state.update(updatedAt=now, accountConnected=False, officialDayTokens=None, resetCreditCount=None)
+            state.update(localOnly=args.local_only, accountPaused=False, accountNextRetryAt=None,
+                lastAccountError=None, lastUsageError=None)
             if poller:
                 account = poller.snapshot()
+                for key in ('accountPaused', 'accountNextRetryAt', 'lastAccountError', 'lastUsageError'):
+                    state[key] = account[key]
                 state['accountConnected'] = account['accountConnected']
                 state['resetCreditCount'] = account['resetCreditCount']
                 if account['rateLimits'] and account['rateUpdatedAt'] >= state['rateUpdatedAt']:
