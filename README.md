@@ -2,11 +2,11 @@
 
 按参考截图制作的社区 GPT 白龙娘形象，显示 Codex 额度、今日 token 和本机任务状态。Windows 本地配套组件；非 OpenAI 官方产品。
 
-<img src="preview-idle.png" width="280" alt="空闲：额度和 token" /> <img src="preview-busy.png" width="280" alt="工作：任务状态" />
+<img src="preview-idle.png" width="280" alt="空闲：额度和 token" /> <img src="preview-busy.png" width="280" alt="工作：任务状态与深紫色问号" />
 
-<img src="preview-notification.png" width="280" alt="递信：有消息待处理" />
+<img src="preview-notification.png" width="280" alt="递信：红心与金色未读提示" />
 
-上图为演示数据。
+上图为演示数据，使用当前界面实际渲染。运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\Render-Previews.ps1` 可重新生成三张示例图；静态图片不展示问号摇摆、红心心跳和人物浮动动画。
 
 ## 启动
 
