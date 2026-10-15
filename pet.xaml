@@ -48,8 +48,16 @@
     <Rectangle.Effect><BlurEffect Radius="1.2"/></Rectangle.Effect>
    </Rectangle>
   </Grid>
-  <Image x:Name="Dragon" Grid.Row="1" Width="127.2" Height="176.4" Stretch="Uniform" VerticalAlignment="Top" Margin="0,5,0,5" RenderTransformOrigin="0.5,1" RenderOptions.BitmapScalingMode="HighQuality">
-   <Image.RenderTransform><TransformGroup><ScaleTransform x:Name="Breath"/><TranslateTransform x:Name="Float"/></TransformGroup></Image.RenderTransform>
-  </Image>
+  <Viewbox x:Name="PoseStage" Grid.Row="1" Width="127.2" Height="176.4" Stretch="Uniform" VerticalAlignment="Top" Margin="0,5,0,5">
+   <Grid Width="212" Height="294">
+    <Image x:Name="Dragon" Width="212" Height="294" Stretch="Uniform" RenderTransformOrigin="0.5,1" RenderOptions.BitmapScalingMode="HighQuality">
+     <Image.RenderTransform><TransformGroup><ScaleTransform x:Name="Breath"/><TranslateTransform x:Name="Float"/></TransformGroup></Image.RenderTransform>
+    </Image>
+    <TextBlock x:Name="PoseSymbol" Text="?" FontFamily="Segoe UI Symbol" FontSize="60" FontWeight="Bold" Foreground="#492C68" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,12,0,0" Visibility="Collapsed" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.6">
+     <TextBlock.RenderTransform><TransformGroup><ScaleTransform x:Name="SymbolScale"/><RotateTransform x:Name="SymbolRotation"/><TranslateTransform x:Name="SymbolFloat"/></TransformGroup></TextBlock.RenderTransform>
+     <TextBlock.Effect><DropShadowEffect Color="White" BlurRadius="4" ShadowDepth="0" Opacity="1"/></TextBlock.Effect>
+    </TextBlock>
+   </Grid>
+  </Viewbox>
  </Grid>
 </Window>

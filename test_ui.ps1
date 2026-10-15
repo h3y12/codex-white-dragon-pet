@@ -49,6 +49,12 @@ $probe.Add_Tick({
    Assert-UI ($parts.Quota.Text -eq '75%') 'Quota display is incorrect'
    if ($status -in @('notification','needs_input')) {
     Assert-UI ($parts.NotificationFrame.Visibility -eq 'Visible') 'Notification border is missing'
+    Assert-UI ($parts.PoseSymbol.Text -eq [string][char]0x2665) 'Letter pose is missing its heart'
+   } elseif ($status -eq 'working') {
+    Assert-UI ($parts.PoseSymbol.Text -eq '?') 'Thinking pose is missing its question mark'
+    Assert-UI ($parts.PoseSymbol.Visibility -eq 'Visible') 'Question mark is hidden'
+   } else {
+    Assert-UI ($parts.PoseSymbol.Visibility -eq 'Collapsed') 'Idle pose must not show a symbol'
    }
    $image = New-Object Windows.Media.Imaging.RenderTargetBitmap([int][Math]::Ceiling($window.ActualWidth),[int][Math]::Ceiling($window.ActualHeight),96,96,[Windows.Media.PixelFormats]::Pbgra32)
    $image.Render($parts.Root)
@@ -64,6 +70,22 @@ $probe.Add_Tick({
    $script:lastRaw = ''; Update-State
    Assert-UI ($parts.Quota.Text -eq '--') 'Unknown quota must not display 100 percent'
    Assert-UI ($parts.Heading.Text -ne $labels.reading) 'Unknown quota broke the UI'
+   Assert-UI ($parts.NotificationFrame.Visibility -eq 'Collapsed') 'Gold effect did not clear after returning to idle'
+   Assert-UI ($parts.PoseSymbol.Visibility -eq 'Collapsed') 'Heart did not clear after returning to idle'
+  } elseif ($script:phase -eq 7) {
+   Write-Fixture 'working'; $script:lastRaw = ''; Update-State
+   $defaults.Animation = $true
+   Update-SymbolMotion 0.25
+   if ([Windows.SystemParameters]::ClientAreaAnimation) {
+    Assert-UI ([Math]::Abs($parts.SymbolRotation.Angle) -gt 1) 'Question mark is not swaying'
+   }
+   Write-Fixture 'notification'; $script:lastRaw = ''; Update-State
+   Update-SymbolMotion 0.256
+   if ([Windows.SystemParameters]::ClientAreaAnimation) {
+    Assert-UI ($parts.SymbolScale.ScaleX -gt 1.1) 'Heart is not pulsing'
+   }
+   $defaults.Animation = $false; Update-SymbolMotion 0.256
+   Assert-UI ($parts.SymbolScale.ScaleX -eq 1 -and $parts.SymbolRotation.Angle -eq 0 -and $parts.SymbolFloat.Y -eq 0) 'Animation toggle did not reset symbol motion'
   } else { $probe.Stop(); $window.Close(); return }
   $script:phase++
  } catch { $script:uiFailure = $_; $probe.Stop(); $window.Close() }

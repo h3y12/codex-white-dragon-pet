@@ -253,7 +253,7 @@ class LocalTelemetry:
         self.next_discovery = 0
         self.read_errors = 0
         self.eligible_threads = set()
-        self.last_notifications = {}
+        self.notification_cache = {}
         self.catalog_available = False
 
     def discover(self):
@@ -357,11 +357,7 @@ class LocalTelemetry:
             status = 'needs_input' if current.pending or current.async_pending else current.stage
             title = current.current_request or self.titles.get(current.session_id, 'Codex 任务')
             stale = now - current.last_event > 600
-        notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads)
-        if notification_errors:
-            notifications = dict(self.last_notifications, **notifications)
-        else:
-            self.last_notifications = dict(notifications)
+        notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads, self.notification_cache)
         waiting_ids = {r.session_id for r in waiting}
         # A pending question takes precedence over unread results and busy work.
         if status != 'needs_input' and notifications:
@@ -382,10 +378,12 @@ class LocalTelemetry:
         }
 
 
-def desktop_notifications(home, eligible_threads):
+def desktop_notifications(home, eligible_threads, cache=None):
     """Read the desktop's saved read state; never mark anything read here."""
     notifications = {}
     errors = 0
+    cache = cache if cache is not None else {}
+    source = {}
     saved = home / '.codex-global-state.json'
     if saved.exists():
         try:
@@ -403,18 +401,26 @@ def desktop_notifications(home, eligible_threads):
                     if host.startswith('local:') and isinstance(ids, list):
                         for ident in ids:
                             if isinstance(ident, str) and ident in eligible_threads:
-                                notifications[ident] = 'Codex 消息'
+                                source[ident] = 'Codex 消息'
         except (OSError, ValueError, AttributeError):
             errors += 1
+            source = dict(cache.get('desktop', {}))
+    cache['desktop'] = source
+    notifications.update(source)
+    source = {}
     database = home / 'sqlite/codex-dev.db'
     if database.exists():
         try:
             with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=.2)) as con:
                 for ident, title, thread_id in con.execute('SELECT id, title, thread_id FROM inbox_items WHERE read_at IS NULL ORDER BY created_at DESC'):
                     key = thread_id or ('inbox:' + str(ident))
-                    notifications.setdefault(key, title or 'Codex 收件箱消息')
+                    source.setdefault(key, title or 'Codex 收件箱消息')
         except sqlite3.Error:
             errors += 1
+            source = dict(cache.get('inbox', {}))
+    cache['inbox'] = source
+    for key, title in source.items():
+        notifications.setdefault(key, title)
     return notifications, errors
 
 
@@ -710,7 +716,7 @@ def run(args):
             for _ in range(10):
                 if stop and stop.exists():
                     break
-                time.sleep(.2)
+                time.sleep(.1)
     finally:
         if poller:
             poller.close()

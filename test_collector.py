@@ -17,6 +17,40 @@ from collector import BEIJING, LocalTelemetry, Rollout
 
 
 class NotificationTests(unittest.TestCase):
+    def test_desktop_read_clears_even_when_inbox_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            (root / 'sqlite').mkdir()
+            db = root / 'sqlite/codex-dev.db'
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('CREATE TABLE inbox_items(id,title,thread_id,read_at,created_at)')
+            local = LocalTelemetry(root)
+            self.assertEqual(local.snapshot()['status'], 'notification')
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('DROP TABLE inbox_items')
+            self.unread(root, [])
+            state = local.snapshot()
+            self.assertEqual(state['status'], 'idle')
+            self.assertEqual(state['notificationCount'], 0)
+            self.assertEqual(state['notificationReadErrors'], 1)
+
+    def test_inbox_read_clears_even_when_desktop_state_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, [])
+            (root / 'sqlite').mkdir(); db = root / 'sqlite/codex-dev.db'
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('CREATE TABLE inbox_items(id,title,thread_id,read_at,created_at)')
+                con.execute('INSERT INTO inbox_items VALUES(?,?,?,?,?)', ('item', 'demo', None, None, 1))
+            local = LocalTelemetry(root)
+            self.assertEqual(local.snapshot()['status'], 'notification')
+            (root / '.codex-global-state.json').write_text('{', encoding='utf-8')
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('UPDATE inbox_items SET read_at=1')
+            state = local.snapshot()
+            self.assertEqual(state['status'], 'idle')
+            self.assertEqual(state['notificationCount'], 0)
+            self.assertEqual(state['notificationReadErrors'], 1)
+
     def event(self, payload, kind='response_item'):
         return {'timestamp': '2026-10-06T01:00:00Z', 'type': kind, 'payload': payload}
 

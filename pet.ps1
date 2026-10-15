@@ -84,7 +84,7 @@ $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
 $reader = New-Object Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $parts = @{}
-foreach ($name in @('Root','Card','NotificationFrame','NotificationSweep','SweepRotation','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
+foreach ($name in @('Root','Card','NotificationFrame','NotificationSweep','SweepRotation','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','PoseStage','PoseSymbol','SymbolScale','SymbolRotation','SymbolFloat','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
 function Load-Pose([string]$filename) {
  $bitmap = New-Object Windows.Media.Imaging.BitmapImage
  $imageStream = [IO.File]::OpenRead((Join-Path $petRoot ('assets/' + $filename)))
@@ -103,7 +103,7 @@ function Sync-PetLayout {
 }
 function Set-PetSize([double]$size) {
  $defaults.Scale = $size
- $parts.Dragon.Width = 212 * $size; $parts.Dragon.Height = 294 * $size
+ $parts.PoseStage.Width = 212 * $size; $parts.PoseStage.Height = 294 * $size
  $window.Width = 304 + 12 * ($defaults.FontSize - 14)
  Sync-PetLayout
 }
@@ -139,7 +139,7 @@ function Save-Settings {
  [IO.File]::WriteAllText($settingsPath, ($defaults | ConvertTo-Json), [Text.Encoding]::UTF8)
 }
 function Set-VisualFont($visual, [double]$size) {
- if ($visual -is [Windows.Controls.TextBlock]) { $visual.FontSize = $size }
+ if ($visual -is [Windows.Controls.TextBlock] -and $visual.Name -ne 'PoseSymbol') { $visual.FontSize = $size }
  for ($i = 0; $i -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($visual); $i++) {
   Set-VisualFont ([Windows.Media.VisualTreeHelper]::GetChild($visual, $i)) $size
  }
@@ -377,6 +377,9 @@ function Update-State {
   $isIdle = $state.status -eq 'idle'
   $isNotification = $state.status -in @('notification', 'needs_input')
   $parts.Dragon.Source = if ($isNotification) { $letterPose } elseif ($isIdle) { $idlePose } else { $thinkingPose }
+  $parts.PoseSymbol.Text = if ($isNotification) { [string][char]0x2665 } else { '?' }
+  $parts.PoseSymbol.Foreground = if ($isNotification) { '#F44366' } else { '#492C68' }
+  $parts.PoseSymbol.Visibility = if ($isNotification -or $state.status -in @('thinking','working')) { 'Visible' } else { 'Collapsed' }
   # A pending message remains visible even when the normal card is collapsed.
   $parts.Card.Visibility = if ($isNotification -or $defaults.CardVisible) { 'Visible' } else { 'Collapsed' }
   $parts.IdlePanel.Visibility = if ($isIdle) { 'Visible' } else { 'Collapsed' }
@@ -442,7 +445,7 @@ function Update-State {
 }
 if (-not $PreviewOnly) { Initialize-PetTray }
 $stateTimer = New-Object Windows.Threading.DispatcherTimer
-$stateTimer.Interval = [TimeSpan]::FromSeconds(1)
+$stateTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $stateTimer.Add_Tick({
  $closeRequest = Join-Path $runtime 'close-request'
  if (-not $PreviewOnly -and (Test-Path -LiteralPath $closeRequest)) { Remove-Item -LiteralPath $closeRequest; $window.Close(); return }
@@ -459,16 +462,58 @@ $stateTimer.Add_Tick({
  }
  Update-State
 }); $stateTimer.Start()
+function Get-MotionSample([string]$kind, [double]$seconds) {
+ if ($kind -eq 'person') {
+  $wave = [Math]::Sin(2 * [Math]::PI * ($seconds % 1))
+  return @{ Y = -2 - 2 * $wave; Scale = 1 + 0.004 * $wave }
+ }
+ if ($kind -eq 'heart') {
+  $phase = ($seconds % 1.6) / 1.6
+  # Circular pulses match both value and slope at the wrap point.
+  $width = [Math]::Sin([Math]::PI * 0.065)
+  $first = [Math]::Sin([Math]::PI * ($phase - 0.16)) / $width
+  $second = [Math]::Sin([Math]::PI * ($phase - 0.34)) / $width
+  $beat = [Math]::Exp(-$first * $first) + 0.65 * [Math]::Exp(-$second * $second)
+  return @{ Scale = 1 + 0.16 * $beat; Angle = 0; Y = 0 }
+ }
+ $phase = 2 * [Math]::PI * (($seconds % 4) / 4)
+ return @{ Scale = 1; Angle = 9 * [Math]::Sin(2 * $phase); Y = -2.5 * [Math]::Sin($phase) }
+}
+function Update-PersonMotion([double]$elapsed) {
+ if ($null -eq $script:lastMotionTime) { $script:lastMotionTime = $elapsed; $script:personPhase = 0; $script:personSpeed = 1.6 }
+ $delta = [Math]::Max(0, $elapsed - $script:lastMotionTime)
+ $script:lastMotionTime = $elapsed
+ if (-not $defaults.Animation -or -not $window.IsVisible) { $parts.Float.Y = 0; $parts.Breath.ScaleY = 1; return }
+ $target = if ($script:status -eq 'idle') { 1.6 } else { 2.6 }
+ # Integrate a smoothly changing speed instead of replacing elapsed * speed.
+ $decay = [Math]::Exp(-5 * $delta)
+ $distance = $target * $delta + ($script:personSpeed - $target) * (1 - $decay) / 5
+ $script:personSpeed = $target + ($script:personSpeed - $target) * $decay
+ $script:personPhase = ($script:personPhase + $distance / (2 * [Math]::PI)) % 1
+ $sample = Get-MotionSample 'person' $script:personPhase
+ $parts.Float.Y = $sample.Y; $parts.Breath.ScaleY = $sample.Scale
+}
+function Update-SymbolMotion([double]$seconds) {
+ $parts.SymbolScale.ScaleX = 1; $parts.SymbolScale.ScaleY = 1
+ $parts.SymbolRotation.Angle = 0; $parts.SymbolFloat.Y = 0
+ if (-not $defaults.Animation -or -not $window.IsVisible -or -not [Windows.SystemParameters]::ClientAreaAnimation -or $parts.PoseSymbol.Visibility -ne 'Visible') { return }
+ if ($script:status -in @('notification','needs_input')) {
+  $sample = Get-MotionSample 'heart' $seconds
+  $parts.SymbolScale.ScaleX = $sample.Scale
+  $parts.SymbolScale.ScaleY = $sample.Scale
+ } elseif ($script:status -in @('thinking','working')) {
+  $sample = Get-MotionSample 'question' $seconds
+  $parts.SymbolRotation.Angle = $sample.Angle
+  $parts.SymbolFloat.Y = $sample.Y
+ }
+}
 $watch = [Diagnostics.Stopwatch]::StartNew()
 $motionTimer = New-Object Windows.Threading.DispatcherTimer
 $motionTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $motionTimer.Add_Tick({
  if ($defaults.Animation -and -not [Windows.SystemParameters]::ClientAreaAnimation) { $defaults.Animation = $false; Update-NotificationOutline }
- if ($defaults.Animation) {
-  $speed = if ($script:status -eq 'idle') { 1.6 } else { 2.6 }
-  $wave = [Math]::Sin($watch.Elapsed.TotalSeconds * $speed)
-  $parts.Float.Y = -2 - 2 * $wave; $parts.Breath.ScaleY = 1 + 0.004 * $wave
- } else { $parts.Float.Y = 0; $parts.Breath.ScaleY = 1 }
+ Update-PersonMotion $watch.Elapsed.TotalSeconds
+ Update-SymbolMotion $watch.Elapsed.TotalSeconds
 }); $motionTimer.Start()
 $script:worker = $null
 if (-not $PreviewOnly) {
