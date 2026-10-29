@@ -17,6 +17,49 @@ from collector import BEIJING, LocalTelemetry, Rollout
 
 
 class NotificationTests(unittest.TestCase):
+    def test_archived_unfinished_log_does_not_count_as_a_running_chat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root)
+            path = root / 'old.jsonl'
+            events = [self.event({'id': 'old'}, 'session_meta'), self.event({'type': 'task_started'}, 'event_msg')]
+            path.write_text(''.join(json.dumps(e) + '\n' for e in events), encoding='utf-8')
+            state = LocalTelemetry(root).snapshot(collector.timestamp('2026-10-06T01:01:00Z'))
+            self.assertEqual(state['activeCount'], 0)
+            self.assertEqual(state['status'], 'idle')
+
+    def test_live_sidebar_read_clears_stale_legacy_and_can_become_unread_again(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            desktop = {'reads': {'one': False}, 'updatedAt': time.time(), 'connected': True}
+            local = LocalTelemetry(root, lambda: desktop)
+            self.assertEqual(local.snapshot()['unreadCount'], 0)
+            desktop['reads']['one'] = True
+            self.assertEqual(local.snapshot()['unreadCount'], 1)
+            desktop['reads']['one'] = False
+            self.assertEqual(local.snapshot()['unreadCount'], 0)
+            # Threads outside the bounded sidebar response remain unknown.
+            desktop['reads'].clear()
+            self.assertEqual(local.snapshot()['unreadCount'], 1)
+
+    def test_old_read_confirmation_cannot_hide_new_output_after_disconnect(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            path = root / 'one.jsonl'
+            path.write_text(json.dumps(self.event({'id': 'one'}, 'session_meta')) + '\n', encoding='utf-8')
+            desktop = {'reads': {'one': False}, 'updatedAt': collector.timestamp('2026-10-06T00:00:00Z'), 'connected': False}
+            self.assertEqual(LocalTelemetry(root, lambda: desktop).snapshot()['unreadCount'], 1)
+
+    def test_sidebar_read_never_dismisses_pending_question(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            path = root / 'one.jsonl'
+            path.write_text(json.dumps(self.event({'id': 'one'}, 'session_meta')) + '\n', encoding='utf-8')
+            desktop = {'reads': {'one': False}, 'updatedAt': time.time(), 'connected': True}
+            local = LocalTelemetry(root, lambda: desktop); local.snapshot()
+            self.ask(local.rollouts[path])
+            self.assertEqual(local.snapshot()['status'], 'needs_input')
+
+
     def test_desktop_read_clears_even_when_inbox_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
@@ -101,7 +144,7 @@ class NotificationTests(unittest.TestCase):
             s=local.snapshot(); self.assertEqual(s['status'],'notification')
             self.assertEqual(s['taskTitle'],'演示任务'); self.assertEqual(s['notificationCount'],1)
             (root/'.codex-global-state.json').write_text('{',encoding='utf-8')
-            s=local.snapshot(); self.assertEqual(s['status'],'notification'); self.assertEqual(s['notificationReadErrors'],1)
+            s=local.snapshot(); self.assertEqual(s['status'],'idle'); self.assertEqual(s['notificationReadErrors'],1)
             self.unread(root,[]); self.assertEqual(local.snapshot()['status'],'idle')
 
     def test_finished_unread_task_keeps_latest_request(self):
@@ -134,7 +177,7 @@ class NotificationTests(unittest.TestCase):
             r.active=True
             s=local.snapshot(now); self.assertEqual(s['status'],'needs_input')
             self.assertEqual(s['notificationCount'],1)
-            self.answer(r); self.assertEqual(local.snapshot(now)['status'],'notification')
+            self.answer(r); self.assertEqual(local.snapshot(now)['status'],'working')
             self.unread(root,[]); self.assertEqual(local.snapshot(now)['status'],'working')
 
     def test_unread_inbox_disappears_when_codex_marks_it_read(self):
@@ -147,8 +190,85 @@ class NotificationTests(unittest.TestCase):
             with closing(sqlite3.connect(db)) as c, c: c.execute('UPDATE inbox_items SET read_at=1')
             self.assertEqual(local.snapshot()['status'],'idle')
 
+    def test_child_unread_is_not_a_user_notification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            (root / 'one.jsonl').write_text(json.dumps(self.event(
+                {'id': 'one', 'source': {'subagent': {'thread_spawn': {'parent_thread_id': 'parent'}}}},
+                'session_meta')) + '\n', encoding='utf-8')
+            state = LocalTelemetry(root).snapshot()
+            self.assertEqual(state['notificationCount'], 0)
+            self.assertEqual(state['status'], 'idle')
+
+    def test_catalog_excludes_child_even_without_rollout_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            with closing(sqlite3.connect(root / 'state_5.sqlite')) as db, db:
+                db.execute('ALTER TABLE threads ADD COLUMN source')
+                db.execute('UPDATE threads SET source=? WHERE id=?', (json.dumps({'subagent': {}}), 'one'))
+            state = LocalTelemetry(root).snapshot()
+            self.assertEqual(state['notificationCount'], 0)
+
+    def test_running_unread_waits_for_completion_before_alerting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, ['one'])
+            path = root / 'one.jsonl'
+            events = [self.event({'id': 'one'}, 'session_meta'),
+                self.event({'type': 'task_started'}, 'event_msg')]
+            path.write_text(''.join(json.dumps(e) + '\n' for e in events), encoding='utf-8')
+            local = LocalTelemetry(root)
+            now = dt.datetime(2026, 10, 6, 9, tzinfo=BEIJING).timestamp()
+            state = local.snapshot(now)
+            self.assertEqual(state['activeCount'], 1)
+            self.assertEqual(state['notificationCount'], 0)
+            self.assertEqual(state['status'], 'thinking')
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(self.event({'type': 'task_complete'}, 'event_msg')) + '\n')
+            state = local.snapshot(now)
+            self.assertEqual(state['activeCount'], 0)
+            self.assertEqual(state['notificationCount'], 1)
+            self.assertEqual(state['status'], 'notification')
+
 
 class TelemetryTests(unittest.TestCase):
+    def test_effort_follows_turn_and_clears_when_unavailable(self):
+        r = Rollout(Path('unused'))
+        self.assertEqual(r.effort, '')
+        for payload, expected in (({'model': 'demo', 'effort': 'high'}, 'high'),
+                ({'effort': 'low'}, 'low'), ({'effort': 'none'}, 'none'),
+                ({}, ''), ({'effort': None}, ''), ({'effort': 123}, '')):
+            r.consume(self.event('2026-10-06T01:00:00Z', 'turn_context', payload))
+            self.assertEqual(r.effort, expected)
+
+    def test_model_follows_turn_context_and_does_not_guess_missing_values(self):
+        r = Rollout(Path('unused'))
+        self.assertEqual(r.model, '')
+        for payload, expected in (({'model': 'gpt-demo-a'}, 'gpt-demo-a'),
+                ({'model': 'gpt-demo-b'}, 'gpt-demo-b'), ({}, ''), ({'model': 123}, '')):
+            r.consume(self.event('2026-10-06T01:00:00Z', 'turn_context', payload))
+            self.assertEqual(r.model, expected)
+
+    def test_model_matches_selected_conversation_and_updates_on_switch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / 'sessions').mkdir()
+            for ident, stamp, model in (('a', '01', 'gpt-demo-a'), ('b', '02', 'gpt-demo-b')):
+                self.write(root / 'sessions' / (ident + '.jsonl'), [
+                    self.event('2026-10-06T' + stamp + ':00:00Z', 'session_meta', {'id': ident}),
+                    self.event('2026-10-06T' + stamp + ':00:00Z', 'turn_context', {'model': model, 'effort': 'high' if ident == 'a' else 'low'}),
+                    self.event('2026-10-06T' + stamp + ':00:00Z', 'event_msg', {'type': 'task_started'})])
+            local = LocalTelemetry(root)
+            now = dt.datetime(2026, 10, 6, 12, tzinfo=BEIJING).timestamp()
+            self.assertEqual(local.snapshot(now)['taskModel'], 'gpt-demo-b')
+            self.assertEqual(local.snapshot(now)['taskEffort'], 'low')
+            with (root / 'sessions/b.jsonl').open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(self.event('2026-10-06T02:01:00Z', 'event_msg', {'type': 'task_complete'})) + '\n')
+            self.assertEqual(local.snapshot(now)['taskModel'], 'gpt-demo-a')
+            self.assertEqual(local.snapshot(now)['taskEffort'], 'high')
+            with (root / 'sessions/a.jsonl').open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(self.event('2026-10-06T02:02:00Z', 'turn_context', {'model': 'gpt-demo-c'})) + '\n')
+            self.assertEqual(local.snapshot(now)['taskModel'], 'gpt-demo-c')
+            self.assertEqual(local.snapshot(now)['taskEffort'], '')
+
     def event(self, stamp, kind, payload):
         return {'timestamp': stamp, 'type': kind, 'payload': payload}
 

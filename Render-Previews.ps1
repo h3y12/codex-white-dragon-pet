@@ -9,6 +9,8 @@ $demo | Add-Member NoteProperty rateUpdatedAt $now
 $demo | Add-Member NoteProperty date ([DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd'))
 $demo | Add-Member NoteProperty rateLimits @{ primary=@{usedPercent=25;resetsAt=$now+7200}; secondary=@{usedPercent=10;resetsAt=$now+259200} }
 $demo | Add-Member NoteProperty status 'idle'
+$demo | Add-Member NoteProperty taskModel 'gpt-6.1-sol'
+$demo | Add-Member NoteProperty taskEffort 'high'
 foreach ($entry in @(@('idle','preview-idle.png'),@('working','preview-busy.png'),@('notification','preview-notification.png'))) {
  $demo.status = $entry[0]
  $fixture = Join-Path $demoFolder ($entry[0] + '.json')

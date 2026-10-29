@@ -40,7 +40,7 @@
   "oldPrimary": "5 小时额度（旧）",
   "oldWeekly": "每周额度（旧）",
   "refreshTime": "刷新：",
-  "coverage": "今日 token：北京时间 00:00 起，本机可读取的 Codex 记录。\n覆盖 {0} 个会话文件；包含缓存输入 token（{1}），输出 token（{2}）。\n输出已包含推理 token，不重复加算。任务状态由本机事件推断。",
+  "coverage": "今日本机token：北京时间 00:00 起，本机可读取的 Codex 记录。\n覆盖 {0} 个会话文件；包含缓存输入 token（{1}），输出 token（{2}）。\n输出已包含推理 token，不重复加算。任务状态由本机事件推断。",
   "official": "账户官方当日值：{0}（服务端日期口径，可能延迟；与本机统计分开显示）",
   "primaryRemaining": "5小时剩余时间：",
   "weeklyRemaining": "每周剩余时间：",
@@ -63,5 +63,7 @@
   "localOnly": "纯本地模式：额度来自本机会话记录",
   "accountPaused": "账户查询已暂停；确认登录与访问权限后重启桌宠",
   "accountRetry": "账户查询失败，已延长重试间隔",
-  "autostart": "随 Codex 启动"
+  "autostart": "随 Codex 启动",
+  "modelFormat": "模型：{0}\n思考强度：{1}",
+  "modelUnknown": "未记录"
 }

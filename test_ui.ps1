@@ -7,7 +7,7 @@ function Assert-UI($Condition, [string]$Message) { if (-not $Condition) { throw 
 function Write-Fixture([string]$Status) {
  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
  $data = @{ status=$Status; taskTitle='Review startup, account connection, and completion notifications';
-  activeCount=2; notificationCount=1; notificationReadErrors=0; localCoverage=2; readErrors=0;
+  taskModel='gpt-6.1-sol'; taskEffort='high'; activeCount=2; notificationCount=1; notificationReadErrors=0; localCoverage=2; readErrors=0;
   todayTokens=12345; cachedTokens=1000; outputTokens=200; updatedAt=$now; rateUpdatedAt=$now;
   date='2026-10-11'; accountConnected=$true; resetCreditCount=2;
   rateLimits=@{ primary=@{usedPercent=25;resetsAt=$now+3600}; secondary=@{usedPercent=10;resetsAt=$now+86400} } }
@@ -47,6 +47,12 @@ $probe.Add_Tick({
    Assert-UI ($parts.Card.ActualHeight -gt 0) 'Card failed to render'
    Assert-UI ($parts.TaskTitle.ActualWidth -le $parts.Card.ActualWidth) 'Title exceeds card width'
    Assert-UI ($parts.Quota.Text -eq '75%') 'Quota display is incorrect'
+   if ($status -in @('working','needs_input')) {
+    Assert-UI ($parts.TaskModel.Text -eq ($labels.modelFormat -f 'gpt-6.1-sol','high')) 'Conversation model or effort is incorrect'
+    Assert-UI ($parts.TaskModel.Visibility -eq 'Visible') 'Conversation model is hidden'
+   } else {
+    Assert-UI ($parts.TaskModel.Visibility -eq 'Collapsed') 'Model should only appear for the current task'
+   }
    if ($status -in @('notification','needs_input')) {
     Assert-UI ($parts.NotificationFrame.Visibility -eq 'Visible') 'Notification border is missing'
     Assert-UI ($parts.PoseSymbol.Text -eq [string][char]0x2665) 'Letter pose is missing its heart'

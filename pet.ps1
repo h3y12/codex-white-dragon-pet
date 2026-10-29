@@ -84,7 +84,7 @@ $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
 $reader = New-Object Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $parts = @{}
-foreach ($name in @('Root','Card','NotificationFrame','NotificationSweep','SweepRotation','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','Activity','TaskNote','PoseStage','PoseSymbol','SymbolScale','SymbolRotation','SymbolFloat','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
+foreach ($name in @('Root','Card','NotificationFrame','NotificationSweep','SweepRotation','Heading','StatusDot','IdlePanel','BusyPanel','Quota','QuotaLabel','QuotaBar','WeeklyLabel','WeeklyQuota','WeeklyBar','PrimaryReset','SecondaryReset','Tokens','PlanExpiry','PlanRemaining','ResetCreditLabel','ResetCredits','Footnote','TaskTitle','TaskModel','Activity','TaskNote','PoseStage','PoseSymbol','SymbolScale','SymbolRotation','SymbolFloat','Dragon','Breath','Float')) { $parts[$name] = $window.FindName($name) }
 function Load-Pose([string]$filename) {
  $bitmap = New-Object Windows.Media.Imaging.BitmapImage
  $imageStream = [IO.File]::OpenRead((Join-Path $petRoot ('assets/' + $filename)))
@@ -392,6 +392,10 @@ function Update-State {
   $parts.Footnote.Text = $labels.localDate + ' ' + $state.date
   if ($state.readErrors -gt 0) { $parts.Footnote.Text += ' ' + $labels.partial }
   $parts.TaskTitle.Text = $state.taskTitle
+  $modelText = if ($state.taskModel) { $state.taskModel } else { $labels.modelUnknown }
+  $effortText = if ($state.taskEffort) { $state.taskEffort } else { $labels.modelUnknown }
+  $parts.TaskModel.Text = $labels.modelFormat -f $modelText, $effortText
+  $parts.TaskModel.Visibility = if ($state.status -in @('working','thinking','needs_input')) { 'Visible' } else { 'Collapsed' }
   $parts.Activity.Text = if ($isNotification) { $labels.notificationCount -f [Math]::Max(1, [int]$state.notificationCount) } elseif ($state.activeCount -gt 1) { $labels.multi -f $state.activeCount } else { $labels.activity }
   $parts.TaskNote.Text = if ($isNotification) { $labels.messageAction } elseif ($state.statusStale) { $labels.staleStatus } else { $labels.finish }
   $limit = $state.rateLimits

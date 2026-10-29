@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from desktop_state import DesktopStateReader
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 
@@ -85,6 +86,8 @@ class Rollout:
         self.stage = 'working'
         self.last_event = 0
         self.current_request = ''
+        self.model = ''
+        self.effort = ''
         self.request_time = 0
         self.started = 0
         self.pending = {}
@@ -140,12 +143,17 @@ class Rollout:
         p = event.get('payload') or {}
         kind = p.get('type', event.get('type'))
         ts = timestamp(event.get('timestamp'))
+        if event.get('type') == 'turn_context':
+            model = p.get('model')
+            self.model = model.strip()[:120] if isinstance(model, str) else ''
+            effort = p.get('effort')
+            self.effort = effort.strip()[:40] if isinstance(effort, str) else ''
         if event.get('type') == 'session_meta':
             ident = p.get('id', p.get('session_id'))
             if isinstance(ident, str):
                 self.session_id = ident
             source = p.get('source')
-            self.child = isinstance(source, dict) and 'subagent' in source
+            self.child = source == 'subagent' or isinstance(source, dict) and 'subagent' in source
         if event.get('type') == 'token_usage_record':
             usage = valid_usage(p.get('usage'))
             if usage is not None:
@@ -246,15 +254,16 @@ class Rollout:
 
 
 class LocalTelemetry:
-    def __init__(self, home):
+    def __init__(self, home, desktop_state=None):
         self.home = home
+        self.desktop_state = desktop_state
         self.rollouts = {}
         self.titles = {}
         self.next_discovery = 0
         self.read_errors = 0
         self.eligible_threads = set()
-        self.notification_cache = {}
         self.catalog_available = False
+        self.child_threads = set()
 
     def discover(self):
         paths = set()
@@ -269,12 +278,24 @@ class LocalTelemetry:
                 with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=1)) as con:
                     eligible = set()
                     titles = {}
-                    for row in con.execute('SELECT id, title, rollout_path, archived FROM threads'):
+                    child_threads = set()
+                    columns = {row[1] for row in con.execute('PRAGMA table_info(threads)')}
+                    source_column = 'source' if 'source' in columns else 'NULL'
+                    for row in con.execute('SELECT id, title, rollout_path, archived, ' + source_column + ' FROM threads'):
                         if not isinstance(row[0], str):
                             self.read_errors += 1
                             continue
                         titles[row[0]] = row[1] if isinstance(row[1], str) else ''
-                        if not row[3]:
+                        source = row[4]
+                        if isinstance(source, str):
+                            try:
+                                source = json.loads(source)
+                            except ValueError:
+                                pass
+                        child = source == 'subagent' or isinstance(source, dict) and 'subagent' in source
+                        if child:
+                            child_threads.add(row[0])
+                        if not row[3] and not child:
                             eligible.add(row[0])
                         if isinstance(row[2], str) and row[2]:
                             try:
@@ -286,6 +307,7 @@ class LocalTelemetry:
                     self.eligible_threads = eligible
                     self.titles = titles
                     self.catalog_available = True
+                    self.child_threads = child_threads
             except sqlite3.Error:
                 self.read_errors += 1
         # Archived and active copies can coexist; response IDs are deduplicated later.
@@ -308,6 +330,7 @@ class LocalTelemetry:
         recent_error = None
         latest_requests = {}
         task_rollouts = {}
+        child_threads = set(self.child_threads)
         rate = None
         rate_time = 0
         errors = self.read_errors
@@ -329,7 +352,8 @@ class LocalTelemetry:
                     output += usage.get('output_tokens', 0)
             if rollout.rate_time > rate_time:
                 rate, rate_time = rollout.rate, rollout.rate_time
-            if rollout.child:
+            if rollout.child or rollout.session_id in child_threads:
+                child_threads.add(rollout.session_id)
                 continue
             if rollout.session_id and rollout.current_request:
                 previous = latest_requests.get(rollout.session_id)
@@ -341,6 +365,8 @@ class LocalTelemetry:
             if previous is None or (rollout.last_event, rollout.request_time, not rollout.active) > (previous.last_event, previous.request_time, not previous.active):
                 task_rollouts[identity] = rollout
         for rollout in task_rollouts.values():
+            if self.catalog_available and rollout.session_id not in self.eligible_threads:
+                continue
             if (rollout.pending or rollout.async_pending) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
                 waiting.append(rollout)
             if rollout.active and now - rollout.last_event < 86400:
@@ -352,12 +378,34 @@ class LocalTelemetry:
         current = max(waiting or active, key=priority) if waiting or active else recent_error
         status = 'idle'
         title = ''
+        model = ''
+        effort = ''
         stale = False
         if current:
             status = 'needs_input' if current.pending or current.async_pending else current.stage
             title = current.current_request or self.titles.get(current.session_id, 'Codex 任务')
+            model = current.model
+            effort = current.effort
             stale = now - current.last_event > 600
-        notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads, self.notification_cache)
+        notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads)
+        desktop = self.desktop_state() if self.desktop_state else {}
+        if self.desktop_state and not desktop.get('connected'):
+            notification_errors += 1
+        for ident, unread in desktop.get('reads', {}).items():
+            if ident not in self.eligible_threads:
+                continue
+            rollout = task_rollouts.get(ident)
+            # Never let an earlier read confirmation suppress a newly completed turn.
+            if not rollout or desktop.get('updatedAt', 0) >= rollout.last_event:
+                if unread is True:
+                    notifications[ident] = 'Codex 消息'
+                elif unread is False:
+                    notifications.pop(ident, None)
+        # Internal agents are not sidebar conversations. A running turn can retain
+        # an unread flag from earlier output; wait for completion before alerting.
+        active_ids = {r.session_id for r in active}
+        notifications = {ident: title for ident, title in notifications.items()
+            if ident not in child_threads and ident not in active_ids}
         waiting_ids = {r.session_id for r in waiting}
         # A pending question takes precedence over unread results and busy work.
         if status != 'needs_input' and notifications:
@@ -365,25 +413,27 @@ class LocalTelemetry:
             ident, title = next(iter(notifications.items()))
             # Completed rollouts retain their request even after leaving the active list.
             title = latest_requests.get(ident, (0, ''))[1] or self.titles.get(ident, title)
+            model = task_rollouts[ident].model if ident in task_rollouts else ''
+            effort = task_rollouts[ident].effort if ident in task_rollouts else ''
             stale = False
         return {
             'date': str(day), 'todayTokens': total, 'cachedTokens': cached,
-            'outputTokens': output, 'status': status, 'taskTitle': title,
+            'outputTokens': output, 'status': status, 'taskTitle': title, 'taskModel': model, 'taskEffort': effort,
             'activeCount': len(active), 'statusStale': stale,
             'notificationCount': len(waiting_ids | set(notifications)),
             'unreadCount': len(notifications), 'pendingInputCount': len(waiting_ids),
             'notificationReadErrors': notification_errors,
+            'desktopStateConnected': bool(desktop.get('connected')),
+            'desktopStateUpdatedAt': desktop.get('updatedAt', 0),
             'rateLimits': rate, 'rateUpdatedAt': rate_time,
             'localCoverage': len(self.rollouts), 'readErrors': errors,
         }
 
 
-def desktop_notifications(home, eligible_threads, cache=None):
+def desktop_notifications(home, eligible_threads):
     """Read the desktop's saved read state; never mark anything read here."""
     notifications = {}
     errors = 0
-    cache = cache if cache is not None else {}
-    source = {}
     saved = home / '.codex-global-state.json'
     if saved.exists():
         try:
@@ -401,26 +451,18 @@ def desktop_notifications(home, eligible_threads, cache=None):
                     if host.startswith('local:') and isinstance(ids, list):
                         for ident in ids:
                             if isinstance(ident, str) and ident in eligible_threads:
-                                source[ident] = 'Codex 消息'
+                                notifications[ident] = 'Codex 消息'
         except (OSError, ValueError, AttributeError):
             errors += 1
-            source = dict(cache.get('desktop', {}))
-    cache['desktop'] = source
-    notifications.update(source)
-    source = {}
     database = home / 'sqlite/codex-dev.db'
     if database.exists():
         try:
             with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=.2)) as con:
                 for ident, title, thread_id in con.execute('SELECT id, title, thread_id FROM inbox_items WHERE read_at IS NULL ORDER BY created_at DESC'):
                     key = thread_id or ('inbox:' + str(ident))
-                    source.setdefault(key, title or 'Codex 收件箱消息')
+                    notifications.setdefault(key, title or 'Codex 收件箱消息')
         except sqlite3.Error:
             errors += 1
-            source = dict(cache.get('inbox', {}))
-    cache['inbox'] = source
-    for key, title in source.items():
-        notifications.setdefault(key, title)
     return notifications, errors
 
 
@@ -565,7 +607,7 @@ def reset_credit_count(reply):
 
 
 class AccountPoller:
-    """Account I/O never blocks the two-second local telemetry loop."""
+    """Account I/O never blocks the one-second local telemetry loop."""
     def __init__(self, home):
         self.home = home
         self.stop_event = threading.Event()
@@ -680,8 +722,14 @@ def run(args):
     destination.parent.mkdir(parents=True, exist_ok=True)
     local = LocalTelemetry(home)
     poller = None
+    desktop_reader = None
     stop = Path(args.stop) if args.stop else None
     try:
+        if not (stop and stop.exists()):
+            desktop_reader = DesktopStateReader(home, Path(__file__).parent)
+            local.desktop_state = desktop_reader.snapshot
+            if args.once:
+                desktop_reader.ready.wait(9)
         if not args.local_only and not (stop and stop.exists()):
             poller = AccountPoller(home)
             if args.once:
@@ -718,6 +766,8 @@ def run(args):
                     break
                 time.sleep(.1)
     finally:
+        if desktop_reader:
+            desktop_reader.close()
         if poller:
             poller.close()
         if stop:
