@@ -37,4 +37,14 @@ if ([Math]::Abs($parts.Float.Y - $previous) -gt 0.001) { throw 'State change cau
 $defaults.Animation = $false; Update-PersonMotion 124
 Assert-Near $parts.Float.Y 0 0 'Disabled position'
 Assert-Near $parts.Breath.ScaleY 1 0 'Disabled scale'
+$defaults.Animation = $true; $script:lastMotionTime = $null
+Update-PersonMotion 200
+$firstY = $parts.Float.Y
+foreach ($time in @(200.05,200.10,200.15,200.20)) { Update-PersonMotion $time }
+if ($script:personPhase -le 0 -or [Math]::Abs($parts.Float.Y - $firstY) -lt 0.5) { throw 'Subsecond frame deltas did not advance character animation' }
+$low = Get-MotionSample 'person' 0.25
+$high = Get-MotionSample 'person' 0.75
+if ([Math]::Abs($high.Y - $low.Y) * 0.4 -lt 3) { throw 'Float is not visible at minimum character size' }
+Assert-Near $high.Scale 1 0 'Character must retain original proportions'
+Assert-Near $low.Scale 1 0 'Character must not be squashed'
 'Motion tests passed: periodic positions, periodic velocities, repeated cycles and continuous state changes.'

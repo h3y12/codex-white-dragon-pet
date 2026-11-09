@@ -36,7 +36,7 @@ class DesktopStateTests(unittest.TestCase):
         reader.state = {'reads': {'one': False}, 'updatedAt': 10, 'connected': True}
         with mock.patch.object(reader, 'caller', return_value='caller'), \
                 mock.patch.object(reader, 'query', side_effect=OSError), \
-                mock.patch.object(reader.stop, 'wait', side_effect=lambda _: reader.stop.set()):
+                mock.patch.object(reader.refresh, 'wait', side_effect=lambda _: reader.stop.set()):
             reader._run()
         self.assertEqual(reader.snapshot(), {'reads': {'one': False}, 'updatedAt': 10, 'connected': False})
 
@@ -71,6 +71,6 @@ class DesktopStateTests(unittest.TestCase):
         with mock.patch.object(reader, 'caller', return_value='caller'), \
                 mock.patch.object(reader, 'query', return_value={'one': False}), \
                 mock.patch('desktop_state.time.time', side_effect=[100, 200]), \
-                mock.patch.object(reader.stop, 'wait', side_effect=lambda _: reader.stop.set()):
+                mock.patch.object(reader.refresh, 'wait', side_effect=lambda _: reader.stop.set()):
             reader._run()
         self.assertEqual(reader.snapshot()['updatedAt'], 100)

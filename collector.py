@@ -420,6 +420,8 @@ class LocalTelemetry:
             'date': str(day), 'todayTokens': total, 'cachedTokens': cached,
             'outputTokens': output, 'status': status, 'taskTitle': title, 'taskModel': model, 'taskEffort': effort,
             'activeCount': len(active), 'statusStale': stale,
+            'latestTaskStarted': max((r.started for ident, r in task_rollouts.items()
+                if not self.catalog_available or ident in self.eligible_threads), default=0),
             'notificationCount': len(waiting_ids | set(notifications)),
             'unreadCount': len(notifications), 'pendingInputCount': len(waiting_ids),
             'notificationReadErrors': notification_errors,
@@ -724,6 +726,8 @@ def run(args):
     poller = None
     desktop_reader = None
     stop = Path(args.stop) if args.stop else None
+    refresh = Path(args.refresh) if getattr(args, 'refresh', None) else None
+    refresh_id = None
     try:
         if not (stop and stop.exists()):
             desktop_reader = DesktopStateReader(home, Path(__file__).parent)
@@ -735,8 +739,19 @@ def run(args):
             if args.once:
                 poller.ready.wait(15)
         while not (stop and stop.exists()):
+            if refresh and refresh.exists():
+                try:
+                    request_id = refresh.read_text(encoding='utf-8-sig').strip()[:80]
+                    refresh.unlink()
+                    refresh_id = request_id
+                    local.next_discovery = 0
+                    if desktop_reader:
+                        desktop_reader.request_refresh()
+                except (OSError, UnicodeError):
+                    pass
             now = time.time()
             state = local.snapshot(now)
+            state['refreshRequestId'] = refresh_id
             state.update(updatedAt=now, accountConnected=False, officialDayTokens=None, resetCreditCount=None)
             state.update(localOnly=args.local_only, accountPaused=False, accountNextRetryAt=None,
                 lastAccountError=None, lastUsageError=None)
@@ -765,6 +780,8 @@ def run(args):
                 if stop and stop.exists():
                     break
                 time.sleep(.1)
+                if refresh and refresh.exists():
+                    break
     finally:
         if desktop_reader:
             desktop_reader.close()
@@ -772,6 +789,8 @@ def run(args):
             poller.close()
         if stop:
             stop.unlink(missing_ok=True)
+        if refresh:
+            refresh.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':
@@ -779,6 +798,7 @@ if __name__ == '__main__':
     parser.add_argument('--state', default=str(Path(__file__).with_name('runtime') / 'state.json'))
     parser.add_argument('--codex-home')
     parser.add_argument('--stop')
+    parser.add_argument('--refresh')
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--local-only', action='store_true')
     run(parser.parse_args())

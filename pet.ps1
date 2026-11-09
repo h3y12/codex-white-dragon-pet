@@ -51,16 +51,17 @@ if (-not $PreviewOnly) {
  catch [Threading.AbandonedMutexException] { } # The new process owns the abandoned lock.
 }
 $stopPath = Join-Path $runtime ('stop-' + [Guid]::NewGuid().ToString('N'))
+$refreshPath = $stopPath + '.refresh'
 if (-not $StatePath) { $StatePath = Join-Path $runtime 'state.json' }
 $settingsPath = Join-Path $runtime 'settings.json'
-$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = '' }
+$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = ''; AutoHide = $true; AutoHideMinutes = 30 }
 if (Test-Path -LiteralPath $settingsPath) {
  try {
   $saved = [IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
   foreach ($key in @($defaults.Keys)) {
    $value = $saved.$key
    if ($null -eq $value) { continue }
-   if ($key -in @('Animation','CardVisible')) {
+   if ($key -in @('Animation','CardVisible','AutoHide')) {
     if ($value -is [bool]) { $defaults[$key] = $value }
    } elseif ($key -eq 'PlanExpiry') {
     if ($value -is [string]) { $defaults[$key] = $value }
@@ -80,6 +81,7 @@ if ($PreviewOnly -and $PreviewPlanExpiry) { $defaults.PlanExpiry = $PreviewPlanE
 $defaults.FontSize = [Math]::Max(10, [Math]::Min(18, [Math]::Round([double]$defaults.FontSize)))
 $defaults.PanelOpacity = [Math]::Max(20, [Math]::Min(100, [double]$defaults.PanelOpacity))
 $defaults.Scale = [Math]::Max(0.4, [Math]::Min(1.0, [double]$defaults.Scale))
+$defaults.AutoHideMinutes = [Math]::Max(1, [Math]::Min(240, [Math]::Round([double]$defaults.AutoHideMinutes)))
 [xml]$xaml = [IO.File]::ReadAllText((Join-Path $petRoot 'pet.xaml'), [Text.Encoding]::UTF8)
 $reader = New-Object Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
@@ -213,6 +215,46 @@ $sizeSlider.Add_ValueChanged({
 $sizePanel.Children.Add($sizeSlider) | Out-Null
 $sizeItem.Header = $sizePanel
 $menu.Items.Add($sizeItem) | Out-Null
+function Get-PlanClock { return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency }
+function Update-PlanActions {
+ if (-not $script:renewExpiry) { return }
+ $valid = $false
+ try {
+  $date = [DateTime]::ParseExact($defaults.PlanExpiry, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+  $null = $date.AddMonths(1); $valid = $true
+ } catch {}
+ if ($script:planRenewal) {
+  $left = 30 - ((Get-PlanClock) - $script:planRenewal.Started)
+  if ($left -le 0 -or $defaults.PlanExpiry -ne $script:planRenewal.After) { $script:planRenewal = $null }
+ }
+ $script:renewExpiry.IsEnabled = $valid -and -not $script:planRenewal
+ $script:undoRenewal.Visibility = if ($script:planRenewal) { 'Visible' } else { 'Collapsed' }
+ if ($script:planRenewal) { $script:undoRenewal.Content = $labels.undoRenewal -f [int][Math]::Ceiling($left) }
+}
+function Set-RenewalDate([string]$value) {
+ $script:changingPlanDate = $true
+ try { $expiryPicker.SelectedDate = [DateTime]::ParseExact($value, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) }
+ finally { $script:changingPlanDate = $false }
+}
+function Extend-PlanExpiry {
+ Update-PlanActions
+ if (-not $script:renewExpiry.IsEnabled) { return $false }
+ $before = $defaults.PlanExpiry
+ $after = [DateTime]::ParseExact($before, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture).AddMonths(1).ToString('yyyy-MM-dd')
+ $script:planRenewal = @{ Before=$before; After=$after; Started=(Get-PlanClock) }
+ Set-RenewalDate $after
+ Update-PlanActions
+ return $true
+}
+function Undo-PlanRenewal {
+ Update-PlanActions
+ if (-not $script:planRenewal) { return $false }
+ $before = $script:planRenewal.Before
+ $script:planRenewal = $null
+ Set-RenewalDate $before
+ Update-PlanActions
+ return $true
+}
 function Update-PlanLabels {
  $expiry = '--'; $remaining = '--'
  try {
@@ -226,6 +268,7 @@ function Update-PlanLabels {
  } catch { $expiry = $labels.unset }
  $parts.PlanExpiry.Text = $labels.planExpiry -f $expiry
  $parts.PlanRemaining.Text = $labels.planRemaining -f $remaining
+ Update-PlanActions
 }
 Update-PlanLabels
 $expiryItem = New-Object Windows.Controls.MenuItem
@@ -239,10 +282,22 @@ $expiryPicker.Width = 210; $expiryPicker.FontSize = $defaults.FontSize
 $expiryPicker.Margin = [Windows.Thickness]::new(0,6,0,0)
 try { if ($defaults.PlanExpiry) { $expiryPicker.SelectedDate = [DateTime]::ParseExact($defaults.PlanExpiry, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } } catch {}
 $expiryPicker.Add_SelectedDateChanged({
+ if (-not $script:changingPlanDate) { $script:planRenewal = $null }
  $defaults.PlanExpiry = if ($expiryPicker.SelectedDate) { $expiryPicker.SelectedDate.ToString('yyyy-MM-dd') } else { '' }
  Update-PlanLabels; Sync-PetLayout; Keep-InWorkArea; Save-Settings
 })
 $expiryPanel.Children.Add($expiryPicker) | Out-Null
+$script:renewExpiry = New-Object Windows.Controls.Button
+$script:renewExpiry.Content = $labels.extendExpiry
+$script:renewExpiry.ToolTip = $labels.extendExpiryHelp
+$script:renewExpiry.Margin = [Windows.Thickness]::new(0,6,0,0)
+$script:renewExpiry.Add_Click({ Extend-PlanExpiry | Out-Null })
+$expiryPanel.Children.Add($script:renewExpiry) | Out-Null
+$script:undoRenewal = New-Object Windows.Controls.Button
+$script:undoRenewal.Margin = [Windows.Thickness]::new(0,6,0,0)
+$script:undoRenewal.Add_Click({ Undo-PlanRenewal | Out-Null })
+$expiryPanel.Children.Add($script:undoRenewal) | Out-Null
+Update-PlanActions
 $clearExpiry = New-Object Windows.Controls.Button
 $clearExpiry.Content = $labels.clearExpiry; $clearExpiry.Margin = [Windows.Thickness]::new(0,6,0,0)
 $clearExpiry.Add_Click({ $expiryPicker.SelectedDate = $null; $expiryPicker.Text = '' })
@@ -252,8 +307,43 @@ $menu.Items.Add($expiryItem) | Out-Null
 $menu.Items.Add((New-Object Windows.Controls.Separator)) | Out-Null
 Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings }
 Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation; Update-NotificationOutline }
-Add-MenuItem $labels.refresh { $script:lastRaw = ''; Update-State }
+function Request-PetRefresh {
+ if (-not $PreviewOnly) {
+  [IO.File]::WriteAllText($refreshPath, [Guid]::NewGuid().ToString('N'), [Text.Encoding]::UTF8)
+  $parts.Heading.Text = $labels.reading
+ } else { $script:lastRaw = ''; Update-State }
+}
+Add-MenuItem $labels.refresh { Request-PetRefresh }
 Add-MenuItem $labels.hidePet { Hide-PetWindow }
+$autoHideItem = New-Object Windows.Controls.MenuItem
+$autoHideItem.Header = $labels.autoHide
+$autoHideItem.IsCheckable = $true
+$autoHideItem.IsChecked = $defaults.AutoHide
+$autoHideItem.Add_Click({
+ $defaults.AutoHide = [bool]$autoHideItem.IsChecked
+ $script:autoHideActivity = Get-PlanClock
+ Save-Settings
+})
+$menu.Items.Add($autoHideItem) | Out-Null
+$autoHideDelayItem = New-Object Windows.Controls.MenuItem
+$autoHideDelayItem.StaysOpenOnClick = $true
+$autoHideDelayPanel = New-Object Windows.Controls.StackPanel
+$autoHideDelayLabel = New-Object Windows.Controls.TextBlock
+$autoHideDelayLabel.Text = $labels.autoHideDelay -f $defaults.AutoHideMinutes
+$autoHideDelayPanel.Children.Add($autoHideDelayLabel) | Out-Null
+$autoHideDelaySlider = New-Object Windows.Controls.Slider
+$autoHideDelaySlider.Width = 210; $autoHideDelaySlider.Minimum = 1; $autoHideDelaySlider.Maximum = 240
+$autoHideDelaySlider.TickFrequency = 1; $autoHideDelaySlider.IsSnapToTickEnabled = $true
+$autoHideDelaySlider.Value = $defaults.AutoHideMinutes
+$autoHideDelaySlider.Add_ValueChanged({
+ $defaults.AutoHideMinutes = [int]$autoHideDelaySlider.Value
+ $autoHideDelayLabel.Text = $labels.autoHideDelay -f $defaults.AutoHideMinutes
+ $script:autoHideActivity = Get-PlanClock
+ Save-Settings
+})
+$autoHideDelayPanel.Children.Add($autoHideDelaySlider) | Out-Null
+$autoHideDelayItem.Header = $autoHideDelayPanel
+$menu.Items.Add($autoHideDelayItem) | Out-Null
 $autostartItem = New-Object Windows.Controls.MenuItem
 $autostartItem.Header = $labels.autostart
 $autostartItem.IsCheckable = $true
@@ -274,13 +364,31 @@ function Dispose-PetTray {
  if ($script:trayMenu) { $script:trayMenu.Dispose(); $script:trayMenu = $null }
  if ($script:trayIcon) { $script:trayIcon.Dispose(); $script:trayIcon = $null }
 }
-function Show-PetWindow {
+function Show-PetWindow([switch]$Automatic) {
+ $script:autoHideActivity = Get-PlanClock
+ $window.ShowActivated = -not $Automatic
  $window.Show(); Sync-PetLayout; Keep-InWorkArea
- $window.Activate() | Out-Null
+ if (-not $Automatic) { $window.Activate() | Out-Null }
 }
 function Hide-PetWindow {
  Save-Settings
  $window.Hide()
+}
+function Update-AutoHide($state, [double]$now = (Get-PlanClock)) {
+ if ($null -eq $script:autoHideActivity) { $script:autoHideActivity = $now }
+ $started = [double]$state.latestTaskStarted
+ $newTask = $null -ne $script:autoHideLatestStart -and $started -gt $script:autoHideLatestStart
+ # Older samples or catalog changes must not replay an already seen task.
+ if ($null -eq $script:autoHideLatestStart -or $started -gt $script:autoHideLatestStart) { $script:autoHideLatestStart = $started }
+ if (-not $defaults.AutoHide) { $script:autoHideActivity = $now; return }
+ if ($newTask) {
+  $script:autoHideActivity = $now
+  if (-not $window.IsVisible) { Show-PetWindow -Automatic; $script:autoHideActivity = $now }
+ }
+ if ($state.activeCount -gt 0 -or $state.pendingInputCount -gt 0) { $script:autoHideActivity = $now; return }
+ # Do not hide on a stale/disconnected sample or while the user is in the menu.
+ if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.updatedAt -gt 15 -or $menu.IsOpen) { return }
+ if ($window.IsVisible -and $now - $script:autoHideActivity -ge $defaults.AutoHideMinutes * 60) { Hide-PetWindow }
 }
 function Initialize-PetTray {
  $script:tray = New-Object System.Windows.Forms.NotifyIcon
@@ -372,6 +480,7 @@ function Update-State {
    return
   }; $script:lastRaw = $raw
   $state = $raw | ConvertFrom-Json
+  Update-AutoHide $state
   $script:lastUpdated = [double]$state.updatedAt
   $script:status = $state.status
   $isIdle = $state.status -eq 'idle'
@@ -469,7 +578,8 @@ $stateTimer.Add_Tick({
 function Get-MotionSample([string]$kind, [double]$seconds) {
  if ($kind -eq 'person') {
   $wave = [Math]::Sin(2 * [Math]::PI * ($seconds % 1))
-  return @{ Y = -2 - 2 * $wave; Scale = 1 + 0.004 * $wave }
+  # Keep the motion visible even at the minimum 40% character size.
+  return @{ Y = -4 - 4 * $wave; Scale = 1 }
  }
  if ($kind -eq 'heart') {
   $phase = ($seconds % 1.6) / 1.6
@@ -485,7 +595,8 @@ function Get-MotionSample([string]$kind, [double]$seconds) {
 }
 function Update-PersonMotion([double]$elapsed) {
  if ($null -eq $script:lastMotionTime) { $script:lastMotionTime = $elapsed; $script:personPhase = 0; $script:personSpeed = 1.6 }
- $delta = [Math]::Max(0, $elapsed - $script:lastMotionTime)
+ # A double first argument selects Max(double,double); integer 0 rounds 50ms to zero.
+ $delta = [Math]::Max(0.0, $elapsed - $script:lastMotionTime)
  $script:lastMotionTime = $elapsed
  if (-not $defaults.Animation -or -not $window.IsVisible) { $parts.Float.Y = 0; $parts.Breath.ScaleY = 1; return }
  $target = if ($script:status -eq 'idle') { 1.6 } else { 2.6 }
@@ -529,6 +640,7 @@ if (-not $PreviewOnly) {
  $workerInfo = New-Object Diagnostics.ProcessStartInfo
  $workerInfo.FileName = $python
  $workerInfo.Arguments = '"' + (Join-Path $petRoot 'collector.py') + '" --state "' + $StatePath + '" --stop "' + $stopPath + '"'
+ $workerInfo.Arguments += ' --refresh "' + $refreshPath + '"'
  if ($LocalOnly) { $workerInfo.Arguments += ' --local-only' }
  $workerInfo.UseShellExecute = $false; $workerInfo.CreateNoWindow = $true; $workerInfo.WorkingDirectory = $petRoot
  $workerInfo.RedirectStandardError = $true
@@ -540,6 +652,7 @@ $window.Add_Closed({
  Dispose-PetTray
  if (-not $PreviewOnly) {
   [IO.File]::WriteAllText($stopPath, 'stop')
+  if (Test-Path -LiteralPath $refreshPath) { Remove-Item -LiteralPath $refreshPath }
   $defaults.Left = $window.Left; $defaults.Top = $window.Top
   [IO.File]::WriteAllText($settingsPath, ($defaults | ConvertTo-Json), [Text.Encoding]::UTF8)
   # Keep the singleton lock until the collector has closed its app-server child.

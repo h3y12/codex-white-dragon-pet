@@ -43,6 +43,7 @@ class DesktopStateReader:
     def __init__(self, home, project):
         self.home, self.project = Path(home), Path(project)
         self.stop = threading.Event()
+        self.refresh = threading.Event()
         self.ready = threading.Event()
         self.lock = threading.Lock()
         self.state = {'reads': {}, 'updatedAt': 0, 'connected': False}
@@ -131,8 +132,13 @@ class DesktopStateReader:
                     self.state['connected'] = False
             finally:
                 self.ready.set()
-            self.stop.wait(1)
+            self.refresh.wait(1)
+            self.refresh.clear()
+
+    def request_refresh(self):
+        self.refresh.set()
 
     def close(self):
         self.stop.set()
+        self.refresh.set()
         self.thread.join(timeout=2)

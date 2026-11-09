@@ -17,6 +17,17 @@ from collector import BEIJING, LocalTelemetry, Rollout
 
 
 class NotificationTests(unittest.TestCase):
+    def test_short_completed_task_retains_start_signal_for_auto_show(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root)
+            events = [self.event({'id': 'one'}, 'session_meta'),
+                self.event({'type': 'task_started'}, 'event_msg'),
+                self.event({'type': 'task_complete'}, 'event_msg')]
+            (root / 'one.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events), encoding='utf-8')
+            state = LocalTelemetry(root).snapshot()
+            self.assertEqual(state['activeCount'], 0)
+            self.assertEqual(state['latestTaskStarted'], collector.timestamp('2026-10-06T01:00:00Z'))
+
     def test_archived_unfinished_log_does_not_count_as_a_running_chat(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self.setup_catalog(root)
@@ -650,6 +661,22 @@ class AccountSafetyTests(unittest.TestCase):
 
 
 class CatalogSafetyTests(unittest.TestCase):
+    def test_refresh_request_is_consumed_and_acknowledged_without_account_queries(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent / 'runtime') as temp, \
+                mock.patch.object(collector, 'DesktopStateReader') as desktop, \
+                mock.patch.object(collector, 'AccountPoller') as account:
+            root = Path(temp); request = root / 'refresh'
+            request.write_text('manual-refresh-test', encoding='utf-8-sig')
+            desktop.return_value.snapshot.return_value = {'connected': True, 'reads': {}}
+            args = argparse.Namespace(codex_home=temp, state=str(root / 'state.json'),
+                stop=None, refresh=str(request), local_only=True, once=True)
+            collector.run(args)
+            state = json.loads((root / 'state.json').read_text(encoding='utf-8'))
+            self.assertEqual(state['refreshRequestId'], 'manual-refresh-test')
+            self.assertFalse(request.exists())
+            desktop.return_value.request_refresh.assert_called_once()
+            account.assert_not_called()
+
     def test_null_rollout_path_does_not_stop_local_telemetry(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

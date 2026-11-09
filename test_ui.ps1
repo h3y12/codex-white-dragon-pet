@@ -21,6 +21,25 @@ $offset = $normalized.LastIndexOf($marker)
 Assert-UI ($offset -ge 0) 'Could not locate the UI entry point'
 $setup = $normalized.Substring(0, $offset).Replace('$PSScriptRoot', ("'" + $root.Replace("'", "''") + "'"))
 . ([scriptblock]::Create($setup)) -PreviewOnly -StatePath $fixture
+$savedExpiry = $defaults.PlanExpiry
+$expiryPicker.SelectedDate = [DateTime]::new(2026,1,31)
+Assert-UI (Extend-PlanExpiry) 'Renewal did not extend the configured date'
+Assert-UI ($defaults.PlanExpiry -eq '2026-02-28') 'Month-end renewal is incorrect'
+Assert-UI (-not (Extend-PlanExpiry)) 'Rapid duplicate renewal was not blocked'
+Assert-UI (Undo-PlanRenewal) 'Renewal could not be undone'
+Assert-UI ($defaults.PlanExpiry -eq '2026-01-31') 'Undo did not restore the original date'
+$expiryPicker.SelectedDate = [DateTime]::new(2028,1,31)
+Assert-UI (Extend-PlanExpiry) 'Leap-year renewal failed'
+Assert-UI ($defaults.PlanExpiry -eq '2028-02-29') 'Leap-year renewal is incorrect'
+$script:planRenewal.Started = (Get-PlanClock) - 31
+Assert-UI (-not (Undo-PlanRenewal)) 'Expired undo should not change the date'
+Assert-UI ($defaults.PlanExpiry -eq '2028-02-29') 'Expired undo changed the date'
+Assert-UI (Extend-PlanExpiry) 'Renewal did not become available after undo expired'
+$expiryPicker.SelectedDate = [DateTime]::new(2028,5,15)
+Assert-UI (-not (Undo-PlanRenewal)) 'Undo overwrote a manually edited date'
+$expiryPicker.SelectedDate = $null
+Assert-UI (-not (Extend-PlanExpiry)) 'Unset expiry should require an initial date'
+if ($savedExpiry) { $expiryPicker.SelectedDate = [DateTime]::ParseExact($savedExpiry,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture) }
 Initialize-PetTray
 $script:phase = 0
 $script:uiFailure = $null
@@ -92,6 +111,55 @@ $probe.Add_Tick({
    }
    $defaults.Animation = $false; Update-SymbolMotion 0.256
    Assert-UI ($parts.SymbolScale.ScaleX -eq 1 -and $parts.SymbolRotation.Angle -eq 0 -and $parts.SymbolFloat.Y -eq 0) 'Animation toggle did not reset symbol motion'
+  } elseif ($script:phase -eq 8) {
+   $oldAutoHide = $defaults.AutoHide; $oldDelay = $defaults.AutoHideMinutes
+   $defaults.AutoHide = $true; $defaults.AutoHideMinutes = 30
+   $script:autoHideActivity = $null; $script:autoHideLatestStart = $null
+   $sample = [pscustomobject]@{latestTaskStarted=1;activeCount=0;pendingInputCount=0;updatedAt=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()}
+   Update-AutoHide $sample 100
+   Update-AutoHide $sample 1899
+   Assert-UI $window.IsVisible 'Auto-hide fired before the configured timeout'
+   Update-AutoHide $sample 1900
+   Assert-UI (-not $window.IsVisible) 'Auto-hide did not fire at the timeout'
+   $sample.latestTaskStarted = 2; $sample.activeCount = 1
+   Update-AutoHide $sample 1901
+   Assert-UI $window.IsVisible 'A new task did not reveal the pet'
+   Assert-UI (-not $window.ShowActivated) 'Automatic reveal should not take keyboard focus'
+   Update-AutoHide $sample 20000
+   Assert-UI $window.IsVisible 'A long running task was hidden'
+   Hide-PetWindow
+   $sample.latestTaskStarted = 3
+   Update-AutoHide $sample 20001
+   Assert-UI $window.IsVisible 'New task with unchanged active count was missed'
+   $sample.activeCount = 0; $sample.pendingInputCount = 1
+   Update-AutoHide $sample 24000
+   Assert-UI $window.IsVisible 'A pending question was hidden'
+   $sample.pendingInputCount = 0
+   Update-AutoHide $sample 25799
+   Assert-UI $window.IsVisible 'Idle countdown did not reset after pending input'
+   Update-AutoHide $sample 25800
+   Assert-UI (-not $window.IsVisible) 'Pet did not hide after input wait ended'
+   $defaults.AutoHide = $false; $sample.latestTaskStarted = 4
+   Update-AutoHide $sample 26000
+   Assert-UI (-not $window.IsVisible) 'Disabled mode revealed the pet'
+   Show-PetWindow
+   Update-AutoHide $sample 30000
+   Assert-UI $window.IsVisible 'Disabled mode hid the pet'
+   $defaults.AutoHide = $oldAutoHide; $defaults.AutoHideMinutes = $oldDelay
+  } elseif ($script:phase -eq 9) {
+   Write-Fixture 'working'; $script:lastRaw = ''; Update-State
+   $defaults.Animation = $true
+   $script:personPhase = 0; $script:personSpeed = 2.6
+   $script:lastMotionTime = $watch.Elapsed.TotalSeconds
+   Update-PersonMotion $watch.Elapsed.TotalSeconds
+   $window.UpdateLayout()
+   $script:personBefore = $parts.Dragon.TransformToAncestor($parts.Root).Transform([Windows.Point]::new(0,0)).Y
+   $script:breathBefore = $parts.Breath.ScaleY
+  } elseif ($script:phase -eq 10) {
+   $window.UpdateLayout()
+   $personAfter = $parts.Dragon.TransformToAncestor($parts.Root).Transform([Windows.Point]::new(0,0)).Y
+   Assert-UI ([Math]::Abs($personAfter - $script:personBefore) -gt 1) ("Live character: before=$script:personBefore after=$personAfter breath=$($parts.Breath.ScaleY) previous=$script:breathBefore phase=$script:personPhase time=$($watch.Elapsed.TotalSeconds) last=$script:lastMotionTime enabled=$($defaults.Animation) visible=$($window.IsVisible)")
+   Assert-UI ($parts.Breath.ScaleY -eq 1) 'Character proportions changed during floating'
   } else { $probe.Stop(); $window.Close(); return }
   $script:phase++
  } catch { $script:uiFailure = $_; $probe.Stop(); $window.Close() }
