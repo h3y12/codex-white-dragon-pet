@@ -364,10 +364,15 @@ class LocalTelemetry:
             # Mirrored files describe one conversation; use its newest task state.
             if previous is None or (rollout.last_event, rollout.request_time, not rollout.active) > (previous.last_event, previous.request_time, not previous.active):
                 task_rollouts[identity] = rollout
+        desktop = self.desktop_state() if self.desktop_state else {}
+        live_waiting = {ident: event['value'] for ident, event in desktop.get('waiting', {}).items()
+            if ident in self.eligible_threads and type(event.get('value')) is bool
+            and event.get('observedAt', 0) >= (task_rollouts[ident].last_event if ident in task_rollouts else 0)}
         for rollout in task_rollouts.values():
             if self.catalog_available and rollout.session_id not in self.eligible_threads:
                 continue
-            if (rollout.pending or rollout.async_pending) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
+            if (rollout.async_pending or rollout.pending and live_waiting.get(rollout.session_id, True)
+                    or live_waiting.get(rollout.session_id, False)) and (not self.catalog_available or rollout.session_id in self.eligible_threads):
                 waiting.append(rollout)
             if rollout.active and now - rollout.last_event < 86400:
                 active.append(rollout)
@@ -382,15 +387,15 @@ class LocalTelemetry:
         effort = ''
         stale = False
         if current:
-            status = 'needs_input' if current.pending or current.async_pending else current.stage
+            status = 'needs_input' if current in waiting else current.stage
             title = current.current_request or self.titles.get(current.session_id, 'Codex 任务')
             model = current.model
             effort = current.effort
             stale = now - current.last_event > 600
         notifications, notification_errors = desktop_notifications(self.home, self.eligible_threads)
-        desktop = self.desktop_state() if self.desktop_state else {}
         if self.desktop_state and not desktop.get('connected'):
             notification_errors += 1
+        notification_errors += desktop.get('waitingReadErrors', 0)
         for ident, unread in desktop.get('reads', {}).items():
             if ident not in self.eligible_threads:
                 continue
@@ -407,6 +412,14 @@ class LocalTelemetry:
         notifications = {ident: title for ident, title in notifications.items()
             if ident not in child_threads and ident not in active_ids}
         waiting_ids = {r.session_id for r in waiting}
+        waiting_ids.update(ident for ident, value in live_waiting.items() if value)
+        if waiting_ids and status != 'needs_input':
+            ident = next(iter(waiting_ids))
+            status = 'needs_input'
+            title = latest_requests.get(ident, (0, ''))[1] or self.titles.get(ident, 'Codex 任务')
+            model = task_rollouts[ident].model if ident in task_rollouts else ''
+            effort = task_rollouts[ident].effort if ident in task_rollouts else ''
+            stale = False
         # A pending question takes precedence over unread results and busy work.
         if status != 'needs_input' and notifications:
             status = 'notification'

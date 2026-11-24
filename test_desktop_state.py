@@ -7,10 +7,54 @@ from unittest import mock
 import sqlite3
 from contextlib import closing
 
-from desktop_state import DesktopStateReader, sidebar_unread
+from desktop_state import DesktopStateReader, sidebar_unread, thread_waiting
+
+
+def setUpModule():
+    (Path(__file__).parent / 'runtime').mkdir(exist_ok=True)
 
 
 class DesktopStateTests(unittest.TestCase):
+    def metadata(self, flags=None, kind='active'):
+        status = {'type': kind}
+        if flags is not None:
+            status['activeFlags'] = flags
+        return {'success': True, 'contentItems': [{'type': 'inputText', 'text': json.dumps(
+            {'schemaVersion': 1, 'thread': {'id': 'one', 'hostId': 'local', 'status': status}})}]}
+
+    def test_metadata_distinguishes_approval_from_normal_work_and_unknown_state(self):
+        self.assertTrue(thread_waiting(self.metadata(['waitingOnApproval']), 'one'))
+        self.assertTrue(thread_waiting(self.metadata(['waitingOnUserInput']), 'one'))
+        self.assertFalse(thread_waiting(self.metadata([]), 'one'))
+        self.assertFalse(thread_waiting(self.metadata(kind='idle'), 'one'))
+        with self.assertRaises(ValueError):
+            thread_waiting(self.metadata(), 'one')
+        with self.assertRaises(ValueError):
+            thread_waiting(self.metadata([]), 'different-thread')
+
+    def test_live_approval_clears_when_execution_resumes_without_reading_turns(self):
+        with mock.patch.object(threading, 'Thread'):
+            reader = DesktopStateReader(Path('unused'), Path('.'))
+        sidebar = self.result([dict(id='one', kind='codex', hostId='local', isUnread=False, status='active')])
+        with mock.patch.object(reader, '_request', side_effect=[sidebar, self.metadata(['waitingOnApproval'])]) as request:
+            result = reader.query('caller')
+            self.assertTrue(result['waiting']['one']['value'])
+            self.assertEqual(request.call_args.args[2]['includeTurns'], False)
+        reader.state.update(result)
+        with mock.patch.object(reader, '_request', side_effect=[sidebar, self.metadata([])]):
+            self.assertFalse(reader.query('caller')['waiting']['one']['value'])
+
+    def test_metadata_failure_does_not_clear_known_waiting_or_break_unread(self):
+        with mock.patch.object(threading, 'Thread'):
+            reader = DesktopStateReader(Path('unused'), Path('.'))
+        reader.state['waiting'] = {'one': {'value': True, 'observedAt': 10}}
+        sidebar = self.result([dict(id='one', kind='codex', hostId='local', isUnread=False, status='active')])
+        with mock.patch.object(reader, '_request', side_effect=[sidebar, OSError('offline')]):
+            result = reader.query('caller')
+        self.assertFalse(result['reads']['one'])
+        self.assertEqual(result['waiting']['one']['observedAt'], 10)
+        self.assertEqual(result['waitingReadErrors'], 1)
+
     def result(self, rows):
         return {'success': True, 'contentItems': [{'type': 'inputText', 'text': json.dumps(
             {'schemaVersion': 4, 'pinnedThreads': [], 'threads': rows})}]}
@@ -69,7 +113,7 @@ class DesktopStateTests(unittest.TestCase):
         with mock.patch.object(threading, 'Thread'):
             reader = DesktopStateReader(Path('unused'), Path('.'))
         with mock.patch.object(reader, 'caller', return_value='caller'), \
-                mock.patch.object(reader, 'query', return_value={'one': False}), \
+                mock.patch.object(reader, 'query', return_value={'reads': {'one': False}}), \
                 mock.patch('desktop_state.time.time', side_effect=[100, 200]), \
                 mock.patch.object(reader.refresh, 'wait', side_effect=lambda _: reader.stop.set()):
             reader._run()

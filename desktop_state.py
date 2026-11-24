@@ -39,6 +39,26 @@ def sidebar_unread(result):
     raise ValueError('Missing sidebar state')
 
 
+def thread_waiting(result, ident):
+    if not isinstance(result, dict) or result.get('success') is not True:
+        raise ValueError('Desktop metadata unavailable')
+    for item in result.get('contentItems', []):
+        if item.get('type') != 'inputText':
+            continue
+        data = json.loads(item['text'])
+        thread = data.get('thread', {})
+        if data.get('schemaVersion') != 1 or thread.get('id') != ident or thread.get('hostId') != 'local':
+            raise ValueError('Unexpected desktop metadata')
+        status = thread.get('status', {})
+        if status.get('type') in ('idle', 'notLoaded', 'systemError'):
+            return False
+        flags = status.get('activeFlags')
+        if status.get('type') != 'active' or not isinstance(flags, list):
+            raise ValueError('Unknown desktop activity flags')
+        return any(flag in ('waitingOnApproval', 'waitingOnUserInput') for flag in flags)
+    raise ValueError('Missing desktop metadata')
+
+
 class DesktopStateReader:
     def __init__(self, home, project):
         self.home, self.project = Path(home), Path(project)
@@ -81,15 +101,41 @@ class DesktopStateReader:
         raise ValueError('No user chat')
 
     def query(self, caller):
+        result = self._request(caller, 'list_threads', {'limit': 50})
+        reads = sidebar_unread(result)
+        state = json.loads(next(item['text'] for item in result['contentItems'] if item.get('type') == 'inputText'))
+        waiting = dict(self.snapshot().get('waiting', {}))
+        errors = 0
+        for row in state['pinnedThreads'] + state['threads']:
+            if row.get('kind') != 'codex' or row.get('hostId') != 'local' or row.get('id') not in reads:
+                continue
+            ident = row['id']
+            if row.get('status') != 'active' and not waiting.get(ident, {}).get('value'):
+                continue
+            if self.stop.is_set():
+                break
+            observed = time.time()
+            try:
+                metadata = self._request(caller, 'read_thread', {'threadId': ident, 'hostId': 'local', 'includeTurns': False})
+                waiting[ident] = {'value': thread_waiting(metadata, ident), 'observedAt': observed}
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                errors += 1
+        # Completed chats only need one final confirmation to retire their cached flag.
+        waiting = {ident: event for ident, event in waiting.items() if ident in reads}
+        return {'reads': reads, 'waiting': waiting, 'waitingReadErrors': errors}
+
+    def _request(self, caller, tool, arguments):
+        if tool not in ('list_threads', 'read_thread'):
+            raise ValueError('Only read-only desktop state queries are allowed')
         if os.name != 'nt':
             raise OSError('Desktop pipe unavailable')
         paths = [name for name in os.listdir('\\\\.\\pipe\\') if name.startswith('codex-app-tools-')]
         if len(paths) != 1:
             raise OSError('Desktop instance ambiguous or unavailable')
-        params = {'arguments': {'limit': 50}, 'callerSource': 'codex', 'hostId': 'local',
-            'namespace': 'codex_app', 'threadId': caller, 'tool': 'list_threads',
+        params = {'arguments': arguments, 'callerSource': 'codex', 'hostId': 'local',
+            'namespace': 'codex_app', 'threadId': caller, 'tool': tool,
             'callId': 'pet-read-' + str(uuid.uuid4()), 'turnId': 'pet-read-' + str(uuid.uuid4())}
-        # This client has exactly one read-only operation. No generic tool dispatch.
+        # Only sidebar and metadata reads; never fetch turns or submit approvals.
         payload = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': params}).encode()
         import msvcrt
         peek = ctypes.WinDLL('kernel32', use_last_error=True).PeekNamedPipe
@@ -114,7 +160,7 @@ class DesktopStateReader:
                     response = json.loads(data[4:size + 4])
                     if response.get('id') != 1 or response.get('jsonrpc') != '2.0':
                         raise ValueError('Invalid desktop response')
-                    return sidebar_unread(response.get('result'))
+                    return response.get('result')
                 self.stop.wait(.02)
         raise TimeoutError('Desktop read timed out')
 
@@ -122,10 +168,10 @@ class DesktopStateReader:
         while not self.stop.is_set():
             try:
                 observed_at = time.time()
-                reads = self.query(self.caller())
+                snapshot = self.query(self.caller())
                 with self.lock:
                     # A slow reply cannot confirm reading output completed mid-query.
-                    self.state = {'reads': reads, 'updatedAt': observed_at, 'connected': True}
+                    self.state = dict(snapshot, updatedAt=observed_at, connected=True)
             except (OSError, ValueError, TypeError, KeyError, AttributeError, sqlite3.Error):
                 # Keep observations and their timestamp, never manufacture an all-read snapshot.
                 with self.lock:

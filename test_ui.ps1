@@ -160,6 +160,63 @@ $probe.Add_Tick({
    $personAfter = $parts.Dragon.TransformToAncestor($parts.Root).Transform([Windows.Point]::new(0,0)).Y
    Assert-UI ([Math]::Abs($personAfter - $script:personBefore) -gt 1) ("Live character: before=$script:personBefore after=$personAfter breath=$($parts.Breath.ScaleY) previous=$script:breathBefore phase=$script:personPhase time=$($watch.Elapsed.TotalSeconds) last=$script:lastMotionTime enabled=$($defaults.Animation) visible=$($window.IsVisible)")
    Assert-UI ($parts.Breath.ScaleY -eq 1) 'Character proportions changed during floating'
+  } elseif ($script:phase -eq 11) {
+   Assert-UI ($menu.Items.Count -le 7) 'Top-level settings menu is too long'
+   Assert-UI ($appearanceMenu.Items.Count -eq 5 -and $behaviorMenu.Items.Count -eq 4) 'Settings grouping is incomplete'
+   $savedQuotaHide = $defaults.HideOnQuotaExhausted
+   $defaults.HideOnQuotaExhausted = $true
+   $script:quotaExhausted = $false
+   $quotaNow = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+   $sample = [pscustomobject]@{updatedAt=$quotaNow;rateUpdatedAt=$quotaNow;rateLimits=@{primary=@{usedPercent=100;resetsAt=$quotaNow+3600};secondary=@{usedPercent=10;resetsAt=$quotaNow+86400}}}
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI (-not $window.IsVisible) 'Exhausted five-hour quota did not hide the pet'
+   $defaults.AutoHide = $true
+   $activity = [pscustomobject]@{latestTaskStarted=999;activeCount=1;pendingInputCount=0;updatedAt=$quotaNow}
+   Update-AutoHide $activity
+   Assert-UI (-not $window.IsVisible) 'A new task bypassed exhausted quota hiding'
+   Show-PetWindow
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI $window.IsVisible 'Manual tray inspection was immediately hidden again'
+   $sample.rateLimits.primary.usedPercent = 10
+   $sample.rateLimits.secondary.usedPercent = 100
+   $script:quotaExhausted = $false
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI (-not $window.IsVisible) 'Exhausted weekly quota did not hide the pet'
+   $sample.rateLimits.secondary.usedPercent = 10
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI (-not $script:quotaExhausted) 'Quota recovery did not release the block'
+   $activity.latestTaskStarted = 1000
+   Update-AutoHide $activity
+   Assert-UI $window.IsVisible 'Next task after quota recovery did not reveal the pet'
+   $sample.rateLimits.primary.usedPercent = 100
+   $sample.rateUpdatedAt = $quotaNow - 181
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI $window.IsVisible 'Stale quota hid the pet'
+   $sample.rateUpdatedAt = $quotaNow
+   $sample.rateLimits.primary.resetsAt = $quotaNow - 1
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI $window.IsVisible 'Expired quota window hid the pet'
+   $sample.rateLimits.primary.usedPercent = $null
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI $window.IsVisible 'Unknown quota hid the pet'
+   $defaults.HideOnQuotaExhausted = $false
+   $sample.rateLimits.secondary.usedPercent = 100
+   Update-QuotaHide $sample $quotaNow
+   Assert-UI $window.IsVisible 'Disabled quota-hide mode hid the pet'
+   $defaults.HideOnQuotaExhausted = $savedQuotaHide
+   $defaults.AutoHide = $oldAutoHide
+   $menu.PlacementTarget = $parts.Root
+   $menu.IsOpen = $true
+  } elseif ($script:phase -eq 12) {
+   $menu.UpdateLayout()
+   Assert-UI ($menu.ActualHeight -lt 400) 'Grouped menu is still too tall'
+   $capture = New-Object Windows.Media.Imaging.RenderTargetBitmap([int][Math]::Ceiling($menu.ActualWidth),[int][Math]::Ceiling($menu.ActualHeight),96,96,[Windows.Media.PixelFormats]::Pbgra32)
+   $capture.Render($menu)
+   $encoder = New-Object Windows.Media.Imaging.PngBitmapEncoder
+   $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($capture))
+   $stream = [IO.File]::Create((Join-Path $output 'settings-menu.png'))
+   try { $encoder.Save($stream) } finally { $stream.Dispose() }
+   $menu.IsOpen = $false
   } else { $probe.Stop(); $window.Close(); return }
   $script:phase++
  } catch { $script:uiFailure = $_; $probe.Stop(); $window.Close() }

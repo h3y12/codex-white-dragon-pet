@@ -16,7 +16,32 @@ import collector
 from collector import BEIJING, LocalTelemetry, Rollout
 
 
+def setUpModule():
+    (Path(__file__).parent / 'runtime').mkdir(exist_ok=True)
+
+
 class NotificationTests(unittest.TestCase):
+    def test_runtime_github_approval_overrides_read_state_and_clears_on_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, [])
+            desktop = {'connected': True, 'reads': {'one': False}, 'updatedAt': time.time(),
+                'waiting': {'one': {'value': True, 'observedAt': time.time()}}}
+            local = LocalTelemetry(root, lambda: desktop)
+            state = local.snapshot()
+            self.assertEqual(state['status'], 'needs_input')
+            self.assertEqual(state['pendingInputCount'], 1)
+            self.assertEqual(state['notificationCount'], 1)
+            desktop['waiting']['one']['value'] = False
+            self.assertEqual(local.snapshot()['notificationCount'], 0)
+
+    def test_old_runtime_approval_does_not_survive_completed_turn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); self.setup_catalog(root); self.unread(root, [])
+            events = [self.event({'id': 'one'}, 'session_meta'), self.event({'type': 'task_complete'}, 'event_msg')]
+            (root / 'one.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events), encoding='utf-8')
+            desktop = {'waiting': {'one': {'value': True, 'observedAt': 1}}, 'connected': False}
+            self.assertEqual(LocalTelemetry(root, lambda: desktop).snapshot()['pendingInputCount'], 0)
+
     def test_short_completed_task_retains_start_signal_for_auto_show(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); self.setup_catalog(root)

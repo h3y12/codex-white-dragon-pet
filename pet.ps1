@@ -54,14 +54,14 @@ $stopPath = Join-Path $runtime ('stop-' + [Guid]::NewGuid().ToString('N'))
 $refreshPath = $stopPath + '.refresh'
 if (-not $StatePath) { $StatePath = Join-Path $runtime 'state.json' }
 $settingsPath = Join-Path $runtime 'settings.json'
-$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = ''; AutoHide = $true; AutoHideMinutes = 30 }
+$defaults = @{ Left = $null; Top = $null; Scale = 0.6; Animation = $true; CardVisible = $true; FontSize = 12; PanelOpacity = 95; PlanExpiry = ''; AutoHide = $true; AutoHideMinutes = 30; HideOnQuotaExhausted = $true }
 if (Test-Path -LiteralPath $settingsPath) {
  try {
   $saved = [IO.File]::ReadAllText($settingsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
   foreach ($key in @($defaults.Keys)) {
    $value = $saved.$key
    if ($null -eq $value) { continue }
-   if ($key -in @('Animation','CardVisible','AutoHide')) {
+   if ($key -in @('Animation','CardVisible','AutoHide','HideOnQuotaExhausted')) {
     if ($value -is [bool]) { $defaults[$key] = $value }
    } elseif ($key -eq 'PlanExpiry') {
     if ($value -is [string]) { $defaults[$key] = $value }
@@ -130,11 +130,21 @@ $window.Add_MouseLeftButtonDown({ if ($_.ChangedButton -eq 'Left') { try { $wind
 $window.Add_KeyDown({ if ($_.Key -eq 'Escape') { $window.Close() } })
 $menu = New-Object Windows.Controls.ContextMenu
 $menu.FontSize = $defaults.FontSize
-function Add-MenuItem([string]$text, [scriptblock]$action) {
- $item = New-Object Windows.Controls.MenuItem; $item.Header = $text; $item.Add_Click($action); $menu.Items.Add($item) | Out-Null
+function Add-MenuItem([string]$text, [scriptblock]$action, $parent = $menu) {
+ $item = New-Object Windows.Controls.MenuItem; $item.Header = $text; $item.Add_Click($action); $parent.Items.Add($item) | Out-Null
 }
 # Labels live in UTF-8 JSON so this script also loads on Windows PowerShell 5.
 $labels = [IO.File]::ReadAllText((Join-Path $petRoot 'labels.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json
+$menu.MinWidth = 220
+$menuStyle = [Windows.Style]::new([Windows.Controls.MenuItem])
+$menuStyle.Setters.Add([Windows.Setter]::new([Windows.Controls.Control]::PaddingProperty,[Windows.Thickness]::new(10,5,10,5)))
+$menu.Resources.Add([Windows.Controls.MenuItem],$menuStyle)
+$appearanceMenu = New-Object Windows.Controls.MenuItem
+$appearanceMenu.Header = $labels.menuAppearance
+$menu.Items.Add($appearanceMenu) | Out-Null
+$behaviorMenu = New-Object Windows.Controls.MenuItem
+$behaviorMenu.Header = $labels.menuBehavior
+$menu.Items.Add($behaviorMenu) | Out-Null
 function Save-Settings {
  if ($PreviewOnly) { return }
  $defaults.Left = $window.Left; $defaults.Top = $window.Top
@@ -172,7 +182,7 @@ $fontSlider.Margin = [Windows.Thickness]::new(0, 8, 0, 0)
 $fontSlider.Add_ValueChanged({ Set-PetFont $fontSlider.Value; Save-Settings })
 $fontPanel.Children.Add($fontSlider) | Out-Null
 $fontItem.Header = $fontPanel
-$menu.Items.Add($fontItem) | Out-Null
+$appearanceMenu.Items.Add($fontItem) | Out-Null
 $opacityItem = New-Object Windows.Controls.MenuItem
 $opacityItem.StaysOpenOnClick = $true
 $opacityPanel = New-Object Windows.Controls.StackPanel
@@ -193,7 +203,7 @@ $opacitySlider.Add_ValueChanged({
 })
 $opacityPanel.Children.Add($opacitySlider) | Out-Null
 $opacityItem.Header = $opacityPanel
-$menu.Items.Add($opacityItem) | Out-Null
+$appearanceMenu.Items.Add($opacityItem) | Out-Null
 $sizeItem = New-Object Windows.Controls.MenuItem
 $sizeItem.StaysOpenOnClick = $true
 $sizePanel = New-Object Windows.Controls.StackPanel
@@ -214,7 +224,7 @@ $sizeSlider.Add_ValueChanged({
 })
 $sizePanel.Children.Add($sizeSlider) | Out-Null
 $sizeItem.Header = $sizePanel
-$menu.Items.Add($sizeItem) | Out-Null
+$appearanceMenu.Items.Add($sizeItem) | Out-Null
 function Get-PlanClock { return [Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency }
 function Update-PlanActions {
  if (-not $script:renewExpiry) { return }
@@ -302,11 +312,15 @@ $clearExpiry = New-Object Windows.Controls.Button
 $clearExpiry.Content = $labels.clearExpiry; $clearExpiry.Margin = [Windows.Thickness]::new(0,6,0,0)
 $clearExpiry.Add_Click({ $expiryPicker.SelectedDate = $null; $expiryPicker.Text = '' })
 $expiryPanel.Children.Add($clearExpiry) | Out-Null
-$expiryItem.Header = $expiryPanel
+$planEditor = New-Object Windows.Controls.MenuItem
+$planEditor.StaysOpenOnClick = $true
+$planEditor.Header = $expiryPanel
+$expiryItem.Header = $labels.menuPlan
+$expiryItem.Items.Add($planEditor) | Out-Null
 $menu.Items.Add($expiryItem) | Out-Null
 $menu.Items.Add((New-Object Windows.Controls.Separator)) | Out-Null
-Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings }
-Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation; Update-NotificationOutline }
+Add-MenuItem $labels.togglePanel { $defaults.CardVisible = -not $defaults.CardVisible; $parts.Card.Visibility = if ($defaults.CardVisible) { 'Visible' } else { 'Collapsed' }; Sync-PetLayout; Keep-InWorkArea; Save-Settings } $appearanceMenu
+Add-MenuItem $labels.toggleAnimation { $defaults.Animation = -not $defaults.Animation; Update-NotificationOutline } $appearanceMenu
 function Request-PetRefresh {
  if (-not $PreviewOnly) {
   [IO.File]::WriteAllText($refreshPath, [Guid]::NewGuid().ToString('N'), [Text.Encoding]::UTF8)
@@ -324,7 +338,7 @@ $autoHideItem.Add_Click({
  $script:autoHideActivity = Get-PlanClock
  Save-Settings
 })
-$menu.Items.Add($autoHideItem) | Out-Null
+$behaviorMenu.Items.Add($autoHideItem) | Out-Null
 $autoHideDelayItem = New-Object Windows.Controls.MenuItem
 $autoHideDelayItem.StaysOpenOnClick = $true
 $autoHideDelayPanel = New-Object Windows.Controls.StackPanel
@@ -343,7 +357,17 @@ $autoHideDelaySlider.Add_ValueChanged({
 })
 $autoHideDelayPanel.Children.Add($autoHideDelaySlider) | Out-Null
 $autoHideDelayItem.Header = $autoHideDelayPanel
-$menu.Items.Add($autoHideDelayItem) | Out-Null
+$behaviorMenu.Items.Add($autoHideDelayItem) | Out-Null
+$quotaHideItem = New-Object Windows.Controls.MenuItem
+$quotaHideItem.Header = $labels.hideOnQuotaExhausted
+$quotaHideItem.IsCheckable = $true
+$quotaHideItem.IsChecked = $defaults.HideOnQuotaExhausted
+$quotaHideItem.Add_Click({
+ $defaults.HideOnQuotaExhausted = [bool]$quotaHideItem.IsChecked
+ if (-not $defaults.HideOnQuotaExhausted) { $script:quotaExhausted = $false }
+ $script:lastRaw = ''; Update-State; Save-Settings
+})
+$behaviorMenu.Items.Add($quotaHideItem) | Out-Null
 $autostartItem = New-Object Windows.Controls.MenuItem
 $autostartItem.Header = $labels.autostart
 $autostartItem.IsCheckable = $true
@@ -356,7 +380,7 @@ $autostartItem.Add_Click({
  } catch { [Windows.MessageBox]::Show($_.Exception.Message, $labels.autostart) | Out-Null }
  $autostartItem.IsChecked = Test-PetAutostart $petRoot
 })
-$menu.Items.Add($autostartItem) | Out-Null
+$behaviorMenu.Items.Add($autostartItem) | Out-Null
 Add-MenuItem $labels.exit { $window.Close() }
 $window.ContextMenu = $menu
 function Dispose-PetTray {
@@ -381,6 +405,7 @@ function Update-AutoHide($state, [double]$now = (Get-PlanClock)) {
  # Older samples or catalog changes must not replay an already seen task.
  if ($null -eq $script:autoHideLatestStart -or $started -gt $script:autoHideLatestStart) { $script:autoHideLatestStart = $started }
  if (-not $defaults.AutoHide) { $script:autoHideActivity = $now; return }
+ if ($script:quotaExhausted -and $defaults.HideOnQuotaExhausted) { return }
  if ($newTask) {
   $script:autoHideActivity = $now
   if (-not $window.IsVisible) { Show-PetWindow -Automatic; $script:autoHideActivity = $now }
@@ -389,6 +414,25 @@ function Update-AutoHide($state, [double]$now = (Get-PlanClock)) {
  # Do not hide on a stale/disconnected sample or while the user is in the menu.
  if ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$state.updatedAt -gt 15 -or $menu.IsOpen) { return }
  if ($window.IsVisible -and $now - $script:autoHideActivity -ge $defaults.AutoHideMinutes * 60) { Hide-PetWindow }
+}
+function Update-QuotaHide($state, [long]$now = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) {
+ if (-not $defaults.HideOnQuotaExhausted) { $script:quotaExhausted = $false; return }
+ $age = $now - [double]$state.rateUpdatedAt
+ if ($state.rateUpdatedAt -le 0 -or $age -lt 0 -or $age -gt 180 -or $now - [double]$state.updatedAt -gt 15) { return }
+ $known = 0; $exhausted = $false
+ foreach ($bucket in @($state.rateLimits.primary,$state.rateLimits.secondary)) {
+  if (-not $bucket) { continue }
+  $used = if ($null -ne $bucket.usedPercent) { $bucket.usedPercent } else { $bucket.used_percent }
+  $reset = if ($null -ne $bucket.resetsAt) { $bucket.resetsAt } else { $bucket.resets_at }
+  if ($null -ne $reset -and [double]$reset -gt 0 -and [double]$reset -le $now) { continue }
+  if ($used -isnot [ValueType] -or $used -is [bool] -or [double]::IsNaN([double]$used) -or [double]::IsInfinity([double]$used) -or [double]$used -lt 0) { continue }
+  $known++
+  if ([double]$used -ge 100) { $exhausted = $true }
+ }
+ if ($exhausted) {
+  if (-not $script:quotaExhausted -and $window.IsVisible) { Hide-PetWindow }
+  $script:quotaExhausted = $true
+ } elseif ($known -eq 2) { $script:quotaExhausted = $false }
 }
 function Initialize-PetTray {
  $script:tray = New-Object System.Windows.Forms.NotifyIcon
@@ -480,6 +524,7 @@ function Update-State {
    return
   }; $script:lastRaw = $raw
   $state = $raw | ConvertFrom-Json
+  Update-QuotaHide $state
   Update-AutoHide $state
   $script:lastUpdated = [double]$state.updatedAt
   $script:status = $state.status
@@ -686,6 +731,6 @@ if ($RenderPath) {
  $outStream = [IO.File]::Create($RenderPath); $encoder.Save($outStream); $outStream.Close(); $window.Close()
 } else {
  # A modal ShowDialog loop ends on Hide; keep dispatching until an explicit exit.
- $window.Show()
+ if (-not ($defaults.HideOnQuotaExhausted -and $script:quotaExhausted)) { $window.Show() }
  [Windows.Threading.Dispatcher]::Run()
 }
